@@ -211,6 +211,9 @@ ucc_status_t ucc_tl_cuda_alg_id_to_init(int alg_id, const char *alg_id_str,
         case UCC_TL_CUDA_BCAST_ALG_LINEAR:
             *init = ucc_tl_cuda_bcast_linear_init;
             break;
+        case UCC_TL_CUDA_BCAST_ALG_CE:
+            *init = ucc_tl_cuda_bcast_ce_init;
+            break;
         default:
             status = UCC_ERR_INVALID_PARAM;
             break;

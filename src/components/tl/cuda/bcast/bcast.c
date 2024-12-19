@@ -12,6 +12,9 @@ ucc_base_coll_alg_info_t
         [UCC_TL_CUDA_BCAST_ALG_LINEAR] = {.id   = UCC_TL_CUDA_BCAST_ALG_LINEAR,
                                           .name = "linear",
                                           .desc = "linear bcast algorithm"},
+        [UCC_TL_CUDA_BCAST_ALG_CE]     = {.id   = UCC_TL_CUDA_BCAST_ALG_CE,
+                                          .name = "ce",
+                                          .desc = "copy engine bcast algorithm"},
         [UCC_TL_CUDA_BCAST_ALG_LAST]   = {.id = 0, .name = NULL, .desc = NULL}};
 
 ucc_status_t ucc_tl_cuda_bcast_init(ucc_base_coll_args_t *coll_args,
@@ -20,8 +23,12 @@ ucc_status_t ucc_tl_cuda_bcast_init(ucc_base_coll_args_t *coll_args,
 {
     ucc_tl_cuda_team_t *team = ucc_derived_of(tl_team, ucc_tl_cuda_team_t);
 
+    ucc_info("hello");
+
     if (ucc_tl_cuda_team_topo_is_fully_connected(team->topo)) {
-        return ucc_tl_cuda_bcast_linear_init(coll_args, tl_team, task_p);
+        // TODO: proper switch 
+        //return ucc_tl_cuda_bcast_linear_init(coll_args, tl_team, task_p);
+        return ucc_tl_cuda_bcast_ce_init(coll_args, tl_team, task_p);
     } else {
         return UCC_ERR_NOT_SUPPORTED;
     }

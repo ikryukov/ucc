@@ -122,7 +122,7 @@ typedef struct ucc_tl_cuda_sync_data {
 } ucc_tl_cuda_sync_data_t;
 
 typedef struct ucc_tl_cuda_mem_info {
-    void              *ptr;
+    void              *ptr;             // Pointer to the device memory region
     size_t             length;
     size_t             offset;
     cudaIpcMemHandle_t handle;
@@ -152,8 +152,8 @@ typedef struct ucc_tl_cuda_sync {
 } ucc_tl_cuda_sync_t;
 
 typedef struct ucc_tl_cuda_scratch {
-    void                  *loc;
-    void                  *rem[UCC_TL_CUDA_MAX_PEERS];
+    void                  *loc;                             // Local CUDA memory for current rank
+    void                  *rem[UCC_TL_CUDA_MAX_PEERS];      // Mampped addresses for remote CUDA memory for other ranks
     ucc_tl_cuda_mem_info_t rem_info[UCC_TL_CUDA_MAX_PEERS];
 } ucc_tl_cuda_scratch_t;
 
@@ -166,8 +166,8 @@ typedef struct ucc_tl_cuda_team {
     ucc_tl_cuda_sync_t        *sync;               // Pointer to shared memory segment for synchronization
     ucc_tl_cuda_sync_state_t  *sync_state;         // Tracks the task currently using the sync segment of shared memory, if free - 0
     ucc_tl_cuda_shm_barrier_t *bar;                // Pointer to the first barrier in an array of size [0; 2 * max_concurrent]. First max_concurrent barriers are for normal mode, the second one for active set mode
-    ucc_tl_cuda_scratch_t      scratch;
-    cudaStream_t               stream;
+    ucc_tl_cuda_scratch_t      scratch;            // Scratch memory for CUDA Operations 
+    cudaStream_t               stream;             // CUDA stream for asynchronous operations
     ucc_tl_cuda_rank_id_t     *ids;
     ucc_team_oob_coll_t        oob;
     void                      *oob_req;
@@ -244,6 +244,17 @@ struct ucc_tl_cuda_task {
             ucc_ee_executor_task_t *exec_task;
             uint64_t                key; // This is mix of user provided tag, root and peer to be unique for each task, algorithm uses it to mark barrier as used
         } bcast_linear;
+        struct {
+            int                     stage;
+            int                     step;
+            void                   *sbuf;
+            ucc_datatype_t          dt;
+            ucc_rank_t              root;
+            size_t                  size;
+            int                     num_steps;
+            ucc_ee_executor_task_t *exec_task;
+            uint64_t                key; // This is mix of user provided tag, root and peer to be unique for each task, algorithm uses it to mark barrier as used
+        } bcast_ce;
         struct {
             int                     stage;
             int                     num_frags;

@@ -30,7 +30,8 @@ alltoallv =                  \
 bcast =                  \
 	bcast/bcast.h        \
 	bcast/bcast.c        \
-	bcast/bcast_linear.c
+	bcast/bcast_linear.c \
+	bcast/bcast_ce.c
 
 reduce_scatter =                           \
 	reduce_scatter/reduce_scatter.h        \

@@ -232,7 +232,7 @@ ucc_status_t ucc_tl_cuda_team_create_test(ucc_base_team_t *tl_team)
     team->oob_req = (void*)0x1;
 
     for (i = 0; i < UCC_TL_TEAM_SIZE(team); i++) {
-           team->scratch.rem[i] = NULL;
+        team->scratch.rem[i] = NULL;
     }
 
     status = ucc_tl_cuda_team_topo_create(&team->super, &team->topo);
@@ -295,6 +295,7 @@ ucc_status_t ucc_tl_cuda_team_create_test(ucc_base_team_t *tl_team)
         CUDA_CHECK_GOTO(cudaIpcGetEventHandle(&sync->ev_handle,
                                              sync->ipc_event_local),
                         exit_err, status);
+        init_semaphore(&sync->semaphore);
     }
 
     ucc_memory_cpu_store_fence();
@@ -324,6 +325,7 @@ barrier:
             CUDA_CHECK_GOTO(cudaIpcOpenEventHandle(&sync->data[j].ipc_event_remote,
                                                    peer_sync->ev_handle),
                             exit_err, status);
+            init_remote_semaphore(&sync->data[j].remote_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, j, i)->semaphore.host_val);
         }
     }
     team->oob_req = NULL;

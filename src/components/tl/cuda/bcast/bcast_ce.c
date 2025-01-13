@@ -90,8 +90,8 @@ static inline ucc_status_t root_find_free_barrier(ucc_tl_cuda_task_t *task)
     for (i = 0; i < max_concurrent; ++i) {
         curr_bar = UCC_TL_CUDA_TEAM_BARRIER(team, max_concurrent + i);
         // try to set user specified tag to mark that this barrier is used by this task
-        if (ucc_atomic_cswap64(&curr_bar->tag, UCC_TAG_FREE,
-                               task->bcast_ce.key) == UCC_TAG_FREE) {
+        if (ucc_atomic_cswap64(&curr_bar->tag, UCC_TL_CUDA_TAG_FREE,
+                               task->bcast_ce.key) == UCC_TL_CUDA_TAG_FREE) {
             ucc_debug("Acquire barrier: %p idx: %d marked with tag: %ld",
                       curr_bar, i, curr_bar->tag);
             task->bar = curr_bar;
@@ -155,16 +155,19 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
 
     task->super.status = UCC_INPROGRESS;
 
-    cudaError_t status = cudaEventQuery(task->bcast_ce.evtCompletion);
-    if (status == cudaErrorNotReady)
+    // TODO: need barrier here to sync host side too
+
+    // cudaError_t status = cudaEventQuery(task->bcast_ce.evtCompletion);
+    cudaError_t status = cudaStreamSynchronize(task->bcast_ce.stream);
+    if (status == cudaSuccess)
     {
+        task->super.status = UCC_OK;
+        ucc_print("Done!");
         return;
     }
 
-    task->super.status = UCC_OK;
     return;
 }
-
 
 static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
 {
@@ -180,20 +183,18 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
     // volatile ucc_tl_cuda_sync_t *peer_sync;
     int i;
 
-    CUDA_CHECK_GOTO(cudaEventCreateWithFlags(&task->bcast_ce.evtCompletion,
-                                             cudaEventDisableTiming),
-                    exit_err, status);
+    // CUDA_CHECK_GOTO(cudaEventCreateWithFlags(&task->bcast_ce.evtCompletion,
+    //                                          cudaEventDisableTiming),
+                    // exit_err, status);
     if (trank == task->bcast_ce.root) {
+        ucc_print("hello from root [%d] / tsize = %d ", trank, tsize);
         // root
         // wait for peer to send
         for (i = 0; i < tsize; ++i) {
             if (i == trank) {
                 continue;
             }
-            // peer_sync = TASK_SYNC(task, i);
-            CUDA_CHECK_GOTO(
-                cudaStreamWaitEvent(stream, sync->data[i].ipc_event_remote, 0),
-                exit_err, status);
+            wait_remote_semaphore(stream, &sync->data[i].remote_semaphore, 0);
         }
         CUDA_CHECK_GOTO(cudaMemcpyAsync(TASK_SCRATCH(task, trank),
                                         task->bcast_ce.sbuf,
@@ -201,28 +202,22 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
                                         cudaMemcpyDeviceToDevice, stream),
                         exit_err, status);
         // root ready to send event
-        CUDA_CHECK_GOTO(cudaEventRecord(sync->ipc_event_local, stream),
-                        exit_err, status);
+        set_val_semaphore(&sync->semaphore, 0);
         // wait all peers for completion of theirs copy
         for (i = 0; i < tsize; ++i) {
             if (i == trank) {
                 continue;
             }
-            // peer_sync = TASK_SYNC(task, i);
-            CUDA_CHECK_GOTO(
-                cudaStreamWaitEvent(stream, sync->data[i].ipc_event_remote, 0),
-                exit_err, status);
+            wait_remote_semaphore(stream, &sync->data[i].remote_semaphore, 1);
         }
+        set_val_semaphore(&sync->semaphore, 1);
     } else {
         // peer scenario
+        ucc_print("hello from peer [%d]", trank);
         // 1 notify root that peer is ready to read data
-        CUDA_CHECK_GOTO(cudaEventRecord(sync->ipc_event_local, stream),
-                        exit_err, status);
+        set_val_semaphore(&sync->semaphore, 0);
         // wait while root places its chunk of data to scratch
-        CUDA_CHECK_GOTO(
-            cudaStreamWaitEvent(
-                stream, sync->data[task->bcast_ce.root].ipc_event_remote, 0),
-            exit_err, status);
+        wait_remote_semaphore(stream, &sync->data[task->bcast_ce.root].remote_semaphore, 0);
         CUDA_CHECK_GOTO(
             cudaMemcpyAsync(task->bcast_ce.sbuf,
                             TASK_SCRATCH(task, task->bcast_ce.root),
@@ -230,16 +225,18 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
                             stream),
             exit_err, status);
         // place event to signal completion
-        CUDA_CHECK_GOTO(cudaEventRecord(sync->ipc_event_local, stream),
-                        exit_err, status);
+        set_val_semaphore(&sync->semaphore, 1);
+
+        wait_remote_semaphore(stream, &sync->data[task->bcast_ce.root].remote_semaphore, 1);
     }
 
     // for tracking stream execution
-    CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
-                    exit_err, status);
+    // CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
+    //                 exit_err, status);
     return UCC_OK;
 
 exit_err:
+    ucc_error("error!");
     return status;
 }
 
@@ -250,10 +247,13 @@ static ucc_status_t ucc_bcast_ce_post(ucc_coll_task_t *coll_task)
     ucc_coll_args_t    *args = &TASK_ARGS(task);
     ucc_datatype_t      dt   = task->bcast_ce.dt;
     size_t              half_scratch_size = get_raw_scratch_size(team) / 2;
+    ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
 
     task->bcast_ce.stream  = team->stream;
 
     task->bcast_ce.stage = STAGE_SYNC;
+
+    set_val_semaphore(&sync->semaphore, -1); // Init but no ready
 
     // in case of active set bcast we need to do additional steps to find free barriers
     if (UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))) {
@@ -287,6 +287,7 @@ static ucc_status_t ucc_bcast_ce_triggered_post(ucc_ee_h ee, ucc_ev_t *ev, ucc_c
     ucc_assert(ee != NULL); // ensure contract
 
     task->bcast_ce.stream = (cudaStream_t) ee->ee_context;
+    ucc_error("Not implemented!");
     
     return UCC_OK; // TODO: just stub
 }

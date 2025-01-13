@@ -16,7 +16,9 @@
 #include "tl_cuda_ep_hash.h"
 #include "tl_cuda_topo.h"
 #include "tl_cuda_team_topo.h"
+#include <cuda.h>
 #include <cuda_runtime.h>
+#include <stdbool.h>
 
 #ifndef UCC_TL_CUDA_DEFAULT_SCORE
 #define UCC_TL_CUDA_DEFAULT_SCORE 40
@@ -65,6 +67,23 @@
 #define UCC_TL_CUDA_PROFILE_REQUEST_NEW   UCC_PROFILE_REQUEST_NEW
 #define UCC_TL_CUDA_PROFILE_REQUEST_EVENT UCC_PROFILE_REQUEST_EVENT
 #define UCC_TL_CUDA_PROFILE_REQUEST_FREE  UCC_PROFILE_REQUEST_FREE
+
+typedef struct stream_semaphore {
+  int32_t host_val;
+  CUdeviceptr dev_sem_val_ptr; 
+} stream_semaphore_t;
+
+typedef struct remote_semaphore {
+  int32_t* host_val_ptr;
+  CUdeviceptr dev_sem_val_ptr; 
+} remote_semaphore_t;
+
+bool init_semaphore(stream_semaphore_t* sem);
+bool wait_semaphore(cudaStream_t stream, stream_semaphore_t* sem, int32_t value);
+void set_val_semaphore(stream_semaphore_t* sem, int32_t value);
+
+bool init_remote_semaphore(remote_semaphore_t* sem, int32_t* remote_val);
+bool wait_remote_semaphore(cudaStream_t stream, remote_semaphore_t* sem, int32_t value);
 
 typedef struct ucc_tl_cuda_iface {
     ucc_tl_iface_t super;
@@ -119,6 +138,7 @@ typedef struct ucc_tl_cuda_shm_barrier {
 
 typedef struct ucc_tl_cuda_sync_data {
     cudaEvent_t ipc_event_remote;
+    remote_semaphore_t remote_semaphore;
 } ucc_tl_cuda_sync_data_t;
 
 typedef struct ucc_tl_cuda_mem_info {
@@ -140,6 +160,7 @@ typedef struct ucc_tl_cuda_sync {
     ucc_tl_cuda_mem_info_t mem_info_dst;
     cudaEvent_t            ipc_event_local;
     cudaIpcEventHandle_t   ev_handle;
+    stream_semaphore_t     semaphore;
     union {
         struct {
             size_t sbytes[UCC_TL_CUDA_MAX_PEERS];

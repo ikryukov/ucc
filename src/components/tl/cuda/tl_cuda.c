@@ -94,10 +94,83 @@ __attribute__((constructor)) static void tl_cuda_iface_init(void)
         ucc_tl_cuda_allgather_algs;
     ucc_tl_cuda.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_ALLGATHERV)] =
         ucc_tl_cuda_allgatherv_algs;
-    ucc_tl_cuda.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_BCAST)] = 
+    ucc_tl_cuda.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_BCAST)] =
         ucc_tl_cuda_bcast_algs;
     ucc_tl_cuda.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_REDUCE_SCATTER)] =
         ucc_tl_cuda_reduce_scatter_algs;
     ucc_tl_cuda.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_REDUCE_SCATTERV)] =
         ucc_tl_cuda_reduce_scatterv_algs;
+}
+
+bool init_semaphore(stream_semaphore_t *sem)
+{
+    assert(sem);
+    sem->dev_sem_val_ptr = 0;
+    sem->host_val = -1; // TODO: pass init value?
+    ucc_memory_cpu_store_fence();
+    CUresult res  = cuMemHostRegister(&sem->host_val, sizeof(sem->host_val),
+                                     CU_MEMHOSTREGISTER_DEVICEMAP);
+    if (res != CUDA_SUCCESS) {
+        ucc_error("Failed to cuMemHostRegister!");
+        return false;
+    }
+    res = cuMemHostGetDevicePointer(&sem->dev_sem_val_ptr, &sem->host_val,
+                                    0 /* flags */);
+    if (res != CUDA_SUCCESS) {
+        ucc_error("cuMemHostGetDevicePointer failed!");
+        return false;
+    }
+    return true;
+}
+
+bool wait_semaphore(cudaStream_t stream, stream_semaphore_t *sem, int32_t value)
+{
+    ucc_assert(sem != NULL);
+    ucc_assert(sem->dev_sem_val_ptr);
+    CUresult res = cuStreamWaitValue32(stream, sem->dev_sem_val_ptr, value,
+                                       CU_STREAM_WAIT_VALUE_EQ);
+    if (res != CUDA_SUCCESS) {
+        ucc_error("cuStreamWaitValue32 failed with code: %d !", res);
+        return false;
+    }
+    return true;
+}
+
+void set_val_semaphore(stream_semaphore_t *sem, int32_t value)
+{
+    sem->host_val = value;
+    ucc_memory_cpu_store_fence();
+}
+
+bool init_remote_semaphore(remote_semaphore_t* sem, int32_t* remote_val)
+{
+    assert(sem);
+    assert(remote_val);
+    sem->host_val_ptr = remote_val;
+    CUresult res  = cuMemHostRegister(sem->host_val_ptr, sizeof(int32_t),
+                                     CU_MEMHOSTREGISTER_DEVICEMAP);
+    if (res != CUDA_SUCCESS) {
+        ucc_error("Failed to cuMemHostRegister!");
+        return false;
+    }
+    res = cuMemHostGetDevicePointer(&sem->dev_sem_val_ptr, sem->host_val_ptr,
+                                    0 /* flags */);
+    if (res != CUDA_SUCCESS) {
+        ucc_error("cuMemHostGetDevicePointer init_remote_semaphore failed!");
+        return false;
+    }
+    return true;
+}
+
+bool wait_remote_semaphore(cudaStream_t stream, remote_semaphore_t* sem, int32_t value)
+{
+    ucc_assert(sem != NULL);
+    ucc_assert(sem->dev_sem_val_ptr);
+    CUresult res = cuStreamWaitValue32(stream, sem->dev_sem_val_ptr, value,
+                                       CU_STREAM_WAIT_VALUE_EQ);
+    if (res != CUDA_SUCCESS) {
+        ucc_error("cuStreamWaitValue32 failed for remote_semaphore_t with code: %d !", res);
+        return false;
+    }
+    return true;
 }

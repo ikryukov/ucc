@@ -80,7 +80,7 @@ typedef struct remote_semaphore {
 
 bool init_semaphore(stream_semaphore_t* sem);
 bool wait_semaphore(cudaStream_t stream, stream_semaphore_t* sem, int32_t value);
-void set_val_semaphore(stream_semaphore_t* sem, int32_t value);
+void set_val_semaphore(cudaStream_t stream, stream_semaphore_t* sem, int32_t value);
 
 bool init_remote_semaphore(remote_semaphore_t* sem, int32_t* remote_val);
 bool wait_remote_semaphore(cudaStream_t stream, remote_semaphore_t* sem, int32_t value);
@@ -273,7 +273,7 @@ struct ucc_tl_cuda_task {
             void                   *sbuf;
             ucc_datatype_t          dt;
             ucc_rank_t              root;
-            size_t                  size;
+            size_t                  size; // total message size in bytes
             int                     num_steps;
             ucc_ee_executor_task_t *exec_task;
             uint64_t                key; // This is mix of user provided tag, root and peer to be unique for each task, algorithm uses it to mark barrier as used

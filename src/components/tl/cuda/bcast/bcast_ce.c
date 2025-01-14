@@ -50,7 +50,7 @@ exit_err:
     return status;
 }
 
-// Tests if setup is complete for a linear broadcast task
+// Tests if setup is complete for a copy engine broadcast task
 static inline ucc_status_t ucc_tl_cuda_bcast_ce_setup_test(ucc_tl_cuda_task_t *task)
 {
     ucc_tl_cuda_team_t *team = TASK_TEAM(task);
@@ -61,20 +61,6 @@ static inline ucc_status_t ucc_tl_cuda_bcast_ce_setup_test(ucc_tl_cuda_task_t *t
 static inline size_t get_raw_scratch_size(ucc_tl_cuda_team_t *team)
 {
     return UCC_TL_CUDA_TEAM_LIB(team)->cfg.scratch_size;
-}
-
-// Posts a copy task to the CUDA executor
-static inline ucc_status_t ecopy(void *dst, void *src, size_t size,
-                                 ucc_ee_executor_t       *exec,
-                                 ucc_ee_executor_task_t **etask)
-{
-    ucc_ee_executor_task_args_t exec_args = {0};
-
-    exec_args.task_type = UCC_EE_EXECUTOR_TASK_COPY;
-    exec_args.copy.dst  = dst;
-    exec_args.copy.src  = src;
-    exec_args.copy.len  = size;
-    return ucc_ee_executor_task_post(exec, &exec_args, etask);
 }
 
 // Root rank searches for and claims a free barrier
@@ -152,20 +138,112 @@ static ucc_status_t ucc_tl_cuda_bcast_ce_finalize(ucc_coll_task_t *coll_task)
 static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
 {
     ucc_tl_cuda_task_t *task              = ucc_derived_of(coll_task, ucc_tl_cuda_task_t);
+    ucc_tl_cuda_team_t *team              = TASK_TEAM(task);
+    ucc_rank_t          trank             = UCC_TL_TEAM_RANK(team);
+
+    ucc_status_t               st;
 
     task->super.status = UCC_INPROGRESS;
 
-    // TODO: need barrier here to sync host side too
-
-    // cudaError_t status = cudaEventQuery(task->bcast_ce.evtCompletion);
-    cudaError_t status = cudaStreamSynchronize(task->bcast_ce.stream);
-    if (status == cudaSuccess)
-    {
-        task->super.status = UCC_OK;
-        ucc_print("Done!");
+    switch (task->bcast_ce.stage) {
+    case STAGE_INIT_BAR_ROOT:
+        st = root_find_free_barrier(task);
+        if (st == UCC_OK) {
+            task->bcast_ce.stage = STAGE_SYNC;
+        } else if (st != UCC_ERR_NOT_FOUND) {
+            task->super.status = st;
+        }
+        // no free barriers found, try next time
         return;
+    case STAGE_FIND_BAR_PEER:
+        st = peer_find_free_barrier(task);
+        if (st == UCC_OK) {
+            // barrier found, continue to next stages
+            task->bcast_ce.stage = STAGE_SYNC;
+        } else if (st != UCC_ERR_NOT_FOUND) {
+            task->super.status = st;
+        }
+        // no free barriers found by root, try next time
+        return;
+    case STAGE_SYNC:
+        if (ucc_tl_cuda_get_sync_root(task, task->bcast_ce.root) != UCC_OK) {
+            return;
+        }
+        task->bcast_ce.step = 0;
+        st = ucc_tl_cuda_bcast_ce_setup_start(task);
+        if (st != UCC_OK) {
+            task->super.status = st;
+            return;
+        }
+        task->bcast_ce.stage = STAGE_SETUP;
+    case STAGE_SETUP:
+        st = ucc_tl_cuda_bcast_ce_setup_test(task);
+        if (st != UCC_OK) {
+            task->super.status = st;
+            return;
+        }
+        task->bcast_ce.stage = STAGE_COPY;
+    default:
+        break;
     }
 
+    switch (task->bcast_ce.stage) {
+        case STAGE_COPY:
+            cudaError_t status = cudaEventQuery(task->bcast_ce.evtCompletion);
+            if (status == cudaSuccess)
+            {
+                ucc_print("cuda stage finished");
+                task->bcast_ce.stage = STAGE_WAIT_ALL;
+            } else if (status == cudaErrorNotReady) {
+                // still in progress
+                // ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
+                // if (trank == task->bcast_ce.root && trank == 0)
+                // {
+                //     ucc_print("root remote semaphore %d", *sync->data[1].remote_semaphore.host_val_ptr);
+                // }
+
+                task->super.status = UCC_INPROGRESS;
+                return;
+            } else {
+                ucc_error("error!");
+                task->super.status = UCC_ERR_NO_MESSAGE;
+                return;
+            }
+            break;
+        case STAGE_WAIT_ALL:
+            // finish
+            st = ucc_tl_cuda_shm_barrier_start(trank, task->bar);
+            if (ucc_unlikely(st != UCC_OK)) {
+                ucc_error("failed to start barrier");
+                task->super.status = st;
+                return;
+            }
+            task->bcast_ce.stage = STAGE_WAIT_COMPLETION;
+        case STAGE_WAIT_COMPLETION:
+            st = ucc_tl_cuda_shm_barrier_test(trank, task->bar);
+            if (st != UCC_OK) {
+                // peers still working, lets check next time
+                task->super.status = st;
+                return;
+            }
+            if (trank == task->bcast_ce.root) {
+                // set barrier free to unlock others, this is roots responsibility
+                ucc_debug("Release bar: %p with tag: %ld", task->bar,
+                        task->bar->tag);
+                task->bar->tag = UCC_TL_CUDA_TAG_FREE;
+                ucc_tl_cuda_put_sync_root(task, task->bcast_ce.root);
+            }
+
+            ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
+            set_val_semaphore(task->bcast_ce.stream, &sync->semaphore, -1); // Init but no ready
+            cudaEventDestroy(task->bcast_ce.evtCompletion);
+
+            task->super.status = UCC_OK;
+            break;
+        default:
+            ucc_assert(0);
+            break;
+        }
     return;
 }
 
@@ -173,66 +251,84 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
 {
     ucc_tl_cuda_team_t *team   = TASK_TEAM(task);
     ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
-    // ucc_coll_args_t    *args   = &TASK_ARGS(task);
     ucc_rank_t          trank  = UCC_TL_TEAM_RANK(team);
     ucc_rank_t          tsize  = UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))
                                      ? (ucc_rank_t)task->subset.map.ep_num
                                      : UCC_TL_TEAM_SIZE(team);
     cudaStream_t        stream = task->bcast_ce.stream;
+    size_t              scratch_size = get_raw_scratch_size(team);
+    void               *scratch_root = TASK_SCRATCH(task, task->bcast_ce.root);
     ucc_status_t        status;
-    // volatile ucc_tl_cuda_sync_t *peer_sync;
-    int i;
+    int i, step;
 
-    // CUDA_CHECK_GOTO(cudaEventCreateWithFlags(&task->bcast_ce.evtCompletion,
-    //                                          cudaEventDisableTiming),
-                    // exit_err, status);
+    CUDA_CHECK_GOTO(cudaEventCreateWithFlags(&task->bcast_ce.evtCompletion,
+                                             cudaEventDisableTiming),
+                    exit_err, status);
     if (trank == task->bcast_ce.root) {
-        ucc_print("hello from root [%d] / tsize = %d ", trank, tsize);
+        ucc_print("hello from root [%d] / tsize = %d", trank, tsize);
         // root
         // wait for peer to send
-        for (i = 0; i < tsize; ++i) {
-            if (i == trank) {
-                continue;
+        for (step = 0; step < task->bcast_ce.num_steps; ++step) {
+            size_t chunk_size =
+                step < task->bcast_ce.num_steps
+                    ? ucc_min(scratch_size, task->bcast_ce.size)
+                    : task->bcast_ce.size -
+                          (task->bcast_ce.step - 1) * scratch_size;
+
+            for (i = 0; i < tsize; ++i) {
+                if (i == trank) {
+                    continue;
+                }
+                wait_remote_semaphore(stream, &sync->data[i].remote_semaphore,
+                                      step);
             }
-            wait_remote_semaphore(stream, &sync->data[i].remote_semaphore, 0);
+            CUDA_CHECK_GOTO(cudaMemcpyAsync(scratch_root,
+                                            PTR_OFFSET(task->bcast_ce.sbuf,
+                                                       step * scratch_size),
+                                            chunk_size,
+                                            cudaMemcpyDeviceToDevice, stream),
+                            exit_err, status);
+            // root ready to send event
+            set_val_semaphore(stream, &sync->semaphore, step);
         }
-        CUDA_CHECK_GOTO(cudaMemcpyAsync(TASK_SCRATCH(task, trank),
-                                        task->bcast_ce.sbuf,
-                                        task->bcast_ce.size,
-                                        cudaMemcpyDeviceToDevice, stream),
-                        exit_err, status);
-        // root ready to send event
-        set_val_semaphore(&sync->semaphore, 0);
         // wait all peers for completion of theirs copy
         for (i = 0; i < tsize; ++i) {
             if (i == trank) {
                 continue;
             }
-            wait_remote_semaphore(stream, &sync->data[i].remote_semaphore, 1);
+            wait_remote_semaphore(stream, &sync->data[i].remote_semaphore,
+                                  task->bcast_ce.num_steps);
         }
-        set_val_semaphore(&sync->semaphore, 1);
     } else {
         // peer scenario
-        ucc_print("hello from peer [%d]", trank);
-        // 1 notify root that peer is ready to read data
-        set_val_semaphore(&sync->semaphore, 0);
-        // wait while root places its chunk of data to scratch
-        wait_remote_semaphore(stream, &sync->data[task->bcast_ce.root].remote_semaphore, 0);
-        CUDA_CHECK_GOTO(
-            cudaMemcpyAsync(task->bcast_ce.sbuf,
-                            TASK_SCRATCH(task, task->bcast_ce.root),
-                            task->bcast_ce.size, cudaMemcpyDeviceToDevice,
-                            stream),
-            exit_err, status);
-        // place event to signal completion
-        set_val_semaphore(&sync->semaphore, 1);
+        ucc_print("hello from peer [%d] / tsize = %d", trank, tsize);
 
-        wait_remote_semaphore(stream, &sync->data[task->bcast_ce.root].remote_semaphore, 1);
+        for (step = 0; step < task->bcast_ce.num_steps; ++step) {
+            size_t chunk_size =
+                step < task->bcast_ce.num_steps
+                    ? ucc_min(scratch_size, task->bcast_ce.size)
+                    : task->bcast_ce.size -
+                          (task->bcast_ce.step - 1) * scratch_size;
+
+            // 1 notify root that peer is ready to read data
+            set_val_semaphore(stream, &sync->semaphore, step);
+            // wait while root places its chunk of data to scratch
+            wait_remote_semaphore(
+                stream, &sync->data[task->bcast_ce.root].remote_semaphore,
+                step);
+            CUDA_CHECK_GOTO(cudaMemcpyAsync(PTR_OFFSET(task->bcast_ce.sbuf,
+                                                       step * scratch_size),
+                                            scratch_root, chunk_size,
+                                            cudaMemcpyDeviceToDevice, stream),
+                            exit_err, status);
+        }
+        // place event to signal completion
+        set_val_semaphore(stream, &sync->semaphore, task->bcast_ce.num_steps);
     }
 
     // for tracking stream execution
-    // CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
-    //                 exit_err, status);
+    CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
+                    exit_err, status);
     return UCC_OK;
 
 exit_err:
@@ -246,30 +342,26 @@ static ucc_status_t ucc_bcast_ce_post(ucc_coll_task_t *coll_task)
     ucc_tl_cuda_team_t *team = TASK_TEAM(task);
     ucc_coll_args_t    *args = &TASK_ARGS(task);
     ucc_datatype_t      dt   = task->bcast_ce.dt;
-    size_t              half_scratch_size = get_raw_scratch_size(team) / 2;
     ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
 
-    task->bcast_ce.stream  = team->stream;
-
+    task->bcast_ce.stream = team->stream;
     task->bcast_ce.stage = STAGE_SYNC;
 
-    set_val_semaphore(&sync->semaphore, -1); // Init but no ready
+    set_val_semaphore(task->bcast_ce.stream, &sync->semaphore, -1); // Init but no ready
 
     // in case of active set bcast we need to do additional steps to find free barriers
-    if (UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))) {
-        task->bcast_ce.stage = UCC_TL_TEAM_RANK(team) == task->bcast_ce.root ? STAGE_INIT_BAR_ROOT : STAGE_FIND_BAR_PEER;
-    }
+    // if (UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))) {
+    //     task->bcast_ce.stage = UCC_TL_TEAM_RANK(team) == task->bcast_ce.root ? STAGE_INIT_BAR_ROOT : STAGE_FIND_BAR_PEER;
+    // }
     
     task->bcast_ce.size = ucc_dt_size(dt) * args->src.info.count;
-    task->bcast_ce.num_steps =
-        ucc_div_round_up(task->bcast_ce.size, half_scratch_size);
-
-    ucc_debug("bcast linear dt: %s, buffer size: %ld, num_steps: %d",
-              ucc_datatype_str(dt), task->bcast_ce.size,
-              task->bcast_ce.num_steps);
-
+    task->bcast_ce.num_steps = ucc_div_round_up(task->bcast_ce.size, get_raw_scratch_size(team));
     task->bcast_ce.sbuf = args->src.info.buffer;
     task->bcast_ce.step = 0;
+
+    ucc_debug("bcast ce dt: %s, buffer size: %ld, num_steps: %d",
+              ucc_datatype_str(dt), task->bcast_ce.size,
+              task->bcast_ce.num_steps);
 
     ucc_status_t st = prepare_commands(task);
     if (st != UCC_OK)

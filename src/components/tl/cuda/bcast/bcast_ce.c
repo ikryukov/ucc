@@ -137,11 +137,10 @@ static ucc_status_t ucc_tl_cuda_bcast_ce_finalize(ucc_coll_task_t *coll_task)
 
 static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
 {
-    ucc_tl_cuda_task_t *task              = ucc_derived_of(coll_task, ucc_tl_cuda_task_t);
-    ucc_tl_cuda_team_t *team              = TASK_TEAM(task);
-    ucc_rank_t          trank             = UCC_TL_TEAM_RANK(team);
-
-    ucc_status_t               st;
+    ucc_tl_cuda_task_t *task  = ucc_derived_of(coll_task, ucc_tl_cuda_task_t);
+    ucc_tl_cuda_team_t *team  = TASK_TEAM(task);
+    ucc_rank_t          trank = UCC_TL_TEAM_RANK(team);
+    ucc_status_t st;
 
     task->super.status = UCC_INPROGRESS;
 
@@ -169,7 +168,6 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
         if (ucc_tl_cuda_get_sync_root(task, task->bcast_ce.root) != UCC_OK) {
             return;
         }
-        task->bcast_ce.step = 0;
         st = ucc_tl_cuda_bcast_ce_setup_start(task);
         if (st != UCC_OK) {
             task->super.status = st;
@@ -196,12 +194,6 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
                 task->bcast_ce.stage = STAGE_WAIT_ALL;
             } else if (status == cudaErrorNotReady) {
                 // still in progress
-                // ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
-                // if (trank == task->bcast_ce.root && trank == 0)
-                // {
-                //     ucc_print("root remote semaphore %d", *sync->data[1].remote_semaphore.host_val_ptr);
-                // }
-
                 task->super.status = UCC_INPROGRESS;
                 return;
             } else {
@@ -273,7 +265,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
                 step < task->bcast_ce.num_steps
                     ? ucc_min(scratch_size, task->bcast_ce.size)
                     : task->bcast_ce.size -
-                          (task->bcast_ce.step - 1) * scratch_size;
+                          (step - 1) * scratch_size;
 
             for (i = 0; i < tsize; ++i) {
                 if (i == trank) {
@@ -308,7 +300,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
                 step < task->bcast_ce.num_steps
                     ? ucc_min(scratch_size, task->bcast_ce.size)
                     : task->bcast_ce.size -
-                          (task->bcast_ce.step - 1) * scratch_size;
+                          (step - 1) * scratch_size;
 
             // 1 notify root that peer is ready to read data
             set_val_semaphore(stream, &sync->semaphore, step);
@@ -342,22 +334,23 @@ static ucc_status_t ucc_bcast_ce_post(ucc_coll_task_t *coll_task)
     ucc_tl_cuda_team_t *team = TASK_TEAM(task);
     ucc_coll_args_t    *args = &TASK_ARGS(task);
     ucc_datatype_t      dt   = task->bcast_ce.dt;
-    ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
+    ucc_tl_cuda_sync_t *sync = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
 
     task->bcast_ce.stream = team->stream;
-    task->bcast_ce.stage = STAGE_SYNC;
+    task->bcast_ce.stage  = STAGE_SYNC;
 
     set_val_semaphore(task->bcast_ce.stream, &sync->semaphore, -1); // Init but no ready
 
     // in case of active set bcast we need to do additional steps to find free barriers
-    // if (UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))) {
-    //     task->bcast_ce.stage = UCC_TL_TEAM_RANK(team) == task->bcast_ce.root ? STAGE_INIT_BAR_ROOT : STAGE_FIND_BAR_PEER;
-    // }
-    
+    if (UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))) {
+        task->bcast_ce.stage = UCC_TL_TEAM_RANK(team) == task->bcast_ce.root
+                                   ? STAGE_INIT_BAR_ROOT
+                                   : STAGE_FIND_BAR_PEER;
+    }
+
     task->bcast_ce.size = ucc_dt_size(dt) * args->src.info.count;
     task->bcast_ce.num_steps = ucc_div_round_up(task->bcast_ce.size, get_raw_scratch_size(team));
     task->bcast_ce.sbuf = args->src.info.buffer;
-    task->bcast_ce.step = 0;
 
     ucc_debug("bcast ce dt: %s, buffer size: %ld, num_steps: %d",
               ucc_datatype_str(dt), task->bcast_ce.size,
@@ -412,7 +405,6 @@ ucc_status_t ucc_tl_cuda_bcast_ce_init(ucc_base_coll_args_t *coll_args,
     task->super.flags         |= UCC_COLL_TASK_FLAG_EXECUTOR;
     task->super.post           = ucc_bcast_ce_post;
     task->super.triggered_post = ucc_bcast_ce_triggered_post;
-
     task->super.progress = ucc_tl_cuda_bcast_ce_progress;
     task->super.finalize = ucc_tl_cuda_bcast_ce_finalize;
 

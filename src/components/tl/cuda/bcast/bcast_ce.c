@@ -369,8 +369,7 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
     return;
 }
 
-
-static ucc_status_t ucc_bcast_ce_post(ucc_coll_task_t *coll_task)
+static ucc_status_t ucc_bcast_ce_post_with_stream(cudaStream_t stream, ucc_coll_task_t *coll_task)
 {
     ucc_tl_cuda_task_t *task = ucc_derived_of(coll_task, ucc_tl_cuda_task_t);
     ucc_tl_cuda_team_t *team = TASK_TEAM(task);
@@ -378,7 +377,7 @@ static ucc_status_t ucc_bcast_ce_post(ucc_coll_task_t *coll_task)
     ucc_datatype_t      dt   = task->bcast_ce.dt;
     ucc_tl_cuda_sync_t *sync = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
 
-    task->bcast_ce.stream = team->stream;
+    task->bcast_ce.stream = stream;
     task->bcast_ce.stage  = STAGE_SYNC;
 
     set_val_semaphore(task->bcast_ce.stream, &sync->semaphore, -1); // Init but no ready
@@ -398,25 +397,35 @@ static ucc_status_t ucc_bcast_ce_post(ucc_coll_task_t *coll_task)
               ucc_datatype_str(dt), task->bcast_ce.size,
               task->bcast_ce.num_steps);
 
-    // ucc_status_t st = prepare_commands(task);
-    // if (st != UCC_OK)
-    // {
-    //     return st;
-    // }
-
     return ucc_progress_queue_enqueue(UCC_TL_CORE_CTX(team)->pq, &task->super);
+}
+
+static ucc_status_t ucc_bcast_ce_post(ucc_coll_task_t *coll_task)
+{
+    ucc_tl_cuda_task_t *task = ucc_derived_of(coll_task, ucc_tl_cuda_task_t);
+    ucc_tl_cuda_team_t *team = TASK_TEAM(task);
+
+    return ucc_bcast_ce_post_with_stream(team->stream, coll_task);
 }
 
 static ucc_status_t ucc_bcast_ce_triggered_post(ucc_ee_h ee, ucc_ev_t *ev, ucc_coll_task_t *coll_task)
 {
-    ucc_tl_cuda_task_t *task = ucc_derived_of(coll_task, ucc_tl_cuda_task_t);
+    ucc_ev_t post_event;
 
     ucc_assert(ee != NULL); // ensure contract
+    ucc_assert(ee->ee_type == UCC_EE_CUDA_STREAM);
+    coll_task->ee = ee;
 
-    task->bcast_ce.stream = (cudaStream_t) ee->ee_context;
-    ucc_error("Not implemented!");
-    
-    return UCC_OK; // TODO: just stub
+    ucc_status_t status = ucc_bcast_ce_post_with_stream((cudaStream_t) ee->ee_context, coll_task);
+    if (ucc_likely(status == UCC_OK)) {
+        post_event.ev_type         = UCC_EVENT_COLLECTIVE_POST;
+        post_event.ev_context_size = 0;
+        post_event.ev_context      = NULL;
+        post_event.req             = &coll_task->super;
+        ucc_ee_set_event_internal(coll_task->ee, &post_event,
+                                  &coll_task->ee->event_out_queue);
+    }
+    return status;
 }
 
 ucc_status_t ucc_tl_cuda_bcast_ce_init(ucc_base_coll_args_t *coll_args,
@@ -444,7 +453,6 @@ ucc_status_t ucc_tl_cuda_bcast_ce_init(ucc_base_coll_args_t *coll_args,
     task->bcast_ce.dt   = coll_args->args.src.info.datatype;
     task->bcast_ce.sbuf = coll_args->args.src.info.buffer;
 
-    task->super.flags         |= UCC_COLL_TASK_FLAG_EXECUTOR;
     task->super.post           = ucc_bcast_ce_post;
     task->super.triggered_post = ucc_bcast_ce_triggered_post;
     task->super.progress = ucc_tl_cuda_bcast_ce_progress;

@@ -130,6 +130,7 @@ ucc_status_t ucc_tl_cuda_task_init(ucc_base_coll_args_t *coll_args,
         // so root rank should remap phys rank of peer with rank 1
         peer = (task->subset.myrank == coll_args->args.root) ? ucc_ep_map_eval(task->subset.map, 1) : task->subset.myrank;
         task->bcast_linear.key = compute_key(coll_args->args.root, peer, coll_args->args.tag);
+        task->bcast_ce.key = task->bcast_linear.key;
         task->seq_num = team->seq_num_active_set++;
     } else {
         task->seq_num = team->seq_num++;

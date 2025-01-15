@@ -269,7 +269,6 @@ struct ucc_tl_cuda_task {
             cudaStream_t            stream;
             cudaEvent_t             evtCompletion;
             int                     stage;
-            int                     step;
             void                   *sbuf;
             ucc_datatype_t          dt;
             ucc_rank_t              root;

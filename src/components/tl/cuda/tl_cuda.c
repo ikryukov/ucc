@@ -164,12 +164,14 @@ bool init_remote_semaphore(remote_semaphore_t* sem, int32_t* remote_val)
                                      CU_MEMHOSTREGISTER_DEVICEMAP);
     if (res != CUDA_SUCCESS) {
         ucc_error("Failed to cuMemHostRegister!");
+        ucc_assert(0);
         return false;
     }
     res = cuMemHostGetDevicePointer(&sem->dev_sem_val_ptr, sem->host_val_ptr,
                                     0 /* flags */);
     if (res != CUDA_SUCCESS) {
         ucc_error("cuMemHostGetDevicePointer init_remote_semaphore failed!");
+        ucc_assert(0);
         return false;
     }
     return true;
@@ -183,6 +185,7 @@ bool wait_remote_semaphore(cudaStream_t stream, remote_semaphore_t* sem, int32_t
                                        CU_STREAM_WAIT_VALUE_EQ);
     if (res != CUDA_SUCCESS) {
         ucc_error("cuStreamWaitValue32 failed for remote_semaphore_t with code: %d !", res);
+        ucc_assert(0);
         return false;
     }
     return true;

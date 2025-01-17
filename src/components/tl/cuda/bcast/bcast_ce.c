@@ -147,12 +147,8 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
     cudaStream_t        stream = task->bcast_ce.stream;
     size_t              scratch_size = get_raw_scratch_size(team);
     void               *scratch_root = TASK_SCRATCH(task, task->bcast_ce.root);
-    // cudaGraph_t        *graph = &task->bcast_ce.graph; 
-    // cudaGraphExec_t    *instance = &task->bcast_ce.instance;
     ucc_status_t        status;
     int i, step, peer;
-
-    // cudaStreamBeginCaptureToGraph(stream, *graph, NULL, NULL, 0, cudaStreamCaptureModeRelaxed);
 
     CUDA_CHECK_GOTO(cudaEventCreateWithFlags(&task->bcast_ce.evtCompletion,
                                              cudaEventDisableTiming),
@@ -205,6 +201,10 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
             wait_remote_semaphore(stream, &sync->data[peer].remote_semaphore,
                                   task->bcast_ce.num_steps);
         }
+        set_val_semaphore(stream, &sync->semaphore, -1); // TODO: wait values more than step
+        // for tracking stream execution
+        CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
+                        exit_err, status);
     } else {
         // peer scenario
         ucc_print("hello from peer [%d] / tsize = %d", trank, tsize);
@@ -230,14 +230,13 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
         }
         // place event to signal completion
         set_val_semaphore(stream, &sync->semaphore, task->bcast_ce.num_steps);
-    }
+        // for tracking stream execution
+        CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
+                        exit_err, status);
 
-    // for tracking stream execution
-    CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
-                    exit_err, status);
-    
-    // CUDA_CHECK_GOTO(cudaStreamEndCapture(stream, graph), exit_err, status);
-    // CUDA_CHECK_GOTO(cudaGraphInstantiate(instance, *graph, 0), exit_err, status);
+        wait_remote_semaphore(
+            stream, &sync->data[task->bcast_ce.root].remote_semaphore, -1);
+    }
 
     return UCC_OK;
 
@@ -292,29 +291,12 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
             task->super.status = st;
             return;
         }
-        task->bcast_ce.stage = STAGE_COPY;
+        task->bcast_ce.stage = STAGE_WAIT_COPY;
     default:
         break;
     }
 
     switch (task->bcast_ce.stage) {
-        case STAGE_COPY:
-            
-            // cudaError_t status = cudaGraphLaunch(task->bcast_ce.instance, task->bcast_ce.stream);
-            // if (status != cudaSuccess) {
-            //     ucc_error("failed to launch cudaGraphLaunch!");
-            //     task->super.status = UCC_ERR_NO_MESSAGE;
-            //     return;
-            // }
-
-            st = prepare_commands(task);
-            if (ucc_unlikely(st != UCC_OK)) {
-                ucc_error("failed prepare_commands");
-                task->super.status = st;
-                return;
-            }
-            task->bcast_ce.stage = STAGE_WAIT_COPY;
-        
         case STAGE_WAIT_COPY:
             cudaError_t status = cudaEventQuery(task->bcast_ce.evtCompletion);
             if (status == cudaSuccess)
@@ -322,6 +304,12 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
                 ucc_print("cuda stage finished");
                 task->bcast_ce.stage = STAGE_WAIT_ALL;
             } else if (status == cudaErrorNotReady) {
+                // if (trank == task->bcast_ce.root) {
+                    // int32_t val_host = *TASK_SYNC(task, UCC_TL_TEAM_RANK(team))->data[1].remote_semaphore.host_val_ptr;
+                    // int32_t my_val_host = TASK_SYNC(task, UCC_TL_TEAM_RANK(team))->semaphore.host_val;
+                    // ucc_print("remote semaphore val: %d, local: %d", val_host, my_val_host);
+                // }
+
                 // still in progress
                 task->super.status = UCC_INPROGRESS;
                 return;
@@ -356,9 +344,9 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
                 ucc_tl_cuda_put_sync_root(task, task->bcast_ce.root);
             }
 
-            ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
-            set_val_semaphore(task->bcast_ce.stream, &sync->semaphore, -1); // Init but no ready
-            cudaEventDestroy(task->bcast_ce.evtCompletion);
+            // ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
+            // set_val_semaphore(task->bcast_ce.stream, &sync->semaphore, -1); // Init but no ready
+            // cudaEventDestroy(task->bcast_ce.evtCompletion);
 
             task->super.status = UCC_OK;
             break;
@@ -396,6 +384,13 @@ static ucc_status_t ucc_bcast_ce_post_with_stream(cudaStream_t stream, ucc_coll_
     ucc_debug("bcast ce dt: %s, buffer size: %ld, num_steps: %d",
               ucc_datatype_str(dt), task->bcast_ce.size,
               task->bcast_ce.num_steps);
+
+    ucc_status_t st = prepare_commands(task);
+    if (ucc_unlikely(st != UCC_OK)) {
+        ucc_error("failed prepare_commands");
+        task->super.status = st;
+        return st;
+    }
 
     return ucc_progress_queue_enqueue(UCC_TL_CORE_CTX(team)->pq, &task->super);
 }

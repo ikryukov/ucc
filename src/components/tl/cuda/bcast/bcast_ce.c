@@ -153,7 +153,6 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
     CUDA_CHECK_GOTO(cudaEventCreateWithFlags(&task->bcast_ce.evtCompletion,
                                              cudaEventDisableTiming),
                     exit_err, status);
-    // TODO: do remap for active set
     if (trank == task->bcast_ce.root) {
         ucc_print("hello from root [%d] / tsize = %d", trank, tsize);
         // root
@@ -233,7 +232,6 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
         // for tracking stream execution
         CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
                         exit_err, status);
-
         wait_remote_semaphore(
             stream, &sync->data[task->bcast_ce.root].remote_semaphore, -1);
     }

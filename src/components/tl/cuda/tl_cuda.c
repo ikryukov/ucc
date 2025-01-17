@@ -112,12 +112,14 @@ bool init_semaphore(stream_semaphore_t *sem)
                                      CU_MEMHOSTREGISTER_DEVICEMAP);
     if (res != CUDA_SUCCESS) {
         ucc_error("Failed to cuMemHostRegister!");
+        ucc_assert(0);
         return false;
     }
     res = cuMemHostGetDevicePointer(&sem->dev_sem_val_ptr, &sem->host_val,
                                     0 /* flags */);
     if (res != CUDA_SUCCESS) {
         ucc_error("cuMemHostGetDevicePointer failed!");
+        ucc_assert(0);
         return false;
     }
     return true;
@@ -135,6 +137,7 @@ bool wait_semaphore(cudaStream_t stream, stream_semaphore_t *sem, int32_t value)
         //     printf("CUDA Error: %s\n", cudaGetErrorString(err));
         // }
         ucc_error("cuStreamWaitValue32 failed with code: %d %s", res, cudaGetErrorString(err));
+        ucc_assert(0);
         return false;
     }
     return true;

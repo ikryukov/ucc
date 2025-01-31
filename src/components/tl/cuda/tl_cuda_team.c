@@ -295,7 +295,8 @@ ucc_status_t ucc_tl_cuda_team_create_test(ucc_base_team_t *tl_team)
         CUDA_CHECK_GOTO(cudaIpcGetEventHandle(&sync->ev_handle,
                                              sync->ipc_event_local),
                         exit_err, status);
-        init_semaphore(&sync->semaphore);
+        init_semaphore(&sync->iter_semaphore);
+        init_semaphore(&sync->done_semaphore);
     }
 
     ucc_memory_cpu_store_fence();
@@ -325,7 +326,8 @@ barrier:
             CUDA_CHECK_GOTO(cudaIpcOpenEventHandle(&sync->data[j].ipc_event_remote,
                                                    peer_sync->ev_handle),
                             exit_err, status);
-            init_remote_semaphore(&sync->data[j].remote_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, j, i)->semaphore.host_val);
+            init_remote_semaphore(&sync->data[j].remote_iter_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, j, i)->iter_semaphore.host_val);
+            init_remote_semaphore(&sync->data[j].remote_done_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, j, i)->done_semaphore.host_val);
         }
     }
     team->oob_req = NULL;

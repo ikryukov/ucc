@@ -70,7 +70,7 @@
 
 typedef struct stream_semaphore {
   int32_t host_val;
-  CUdeviceptr dev_sem_val_ptr; 
+  CUdeviceptr dev_sem_val_ptr;
 } stream_semaphore_t;
 
 typedef struct remote_semaphore {
@@ -138,7 +138,8 @@ typedef struct ucc_tl_cuda_shm_barrier {
 
 typedef struct ucc_tl_cuda_sync_data {
     cudaEvent_t ipc_event_remote;
-    remote_semaphore_t remote_semaphore;
+    remote_semaphore_t remote_iter_semaphore;
+    remote_semaphore_t remote_done_semaphore;
 } ucc_tl_cuda_sync_data_t;
 
 typedef struct ucc_tl_cuda_mem_info {
@@ -160,7 +161,8 @@ typedef struct ucc_tl_cuda_sync {
     ucc_tl_cuda_mem_info_t mem_info_dst;
     cudaEvent_t            ipc_event_local;
     cudaIpcEventHandle_t   ev_handle;
-    stream_semaphore_t     semaphore;
+    stream_semaphore_t     iter_semaphore;
+    stream_semaphore_t     done_semaphore;
     union {
         struct {
             size_t sbytes[UCC_TL_CUDA_MAX_PEERS];

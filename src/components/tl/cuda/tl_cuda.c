@@ -133,9 +133,6 @@ bool wait_semaphore(cudaStream_t stream, stream_semaphore_t *sem, int32_t value)
                                        CU_STREAM_WAIT_VALUE_EQ);
     if (res != CUDA_SUCCESS) {
         cudaError_t err = cudaGetLastError();
-        // if (err != cudaSuccess) {
-        //     printf("CUDA Error: %s\n", cudaGetErrorString(err));
-        // }
         ucc_error("cuStreamWaitValue32 failed with code: %d %s", res, cudaGetErrorString(err));
         ucc_assert(0);
         return false;
@@ -147,8 +144,6 @@ void set_val_semaphore(cudaStream_t stream, stream_semaphore_t *sem, int32_t val
 {
     ucc_assert(sem != NULL);
     ucc_assert(sem->dev_sem_val_ptr);
-    // sem->host_val = value;
-    // ucc_memory_cpu_store_fence();
     CUresult res = cuStreamWriteValue32(stream, sem->dev_sem_val_ptr, value, 0);
     if (res != CUDA_SUCCESS) {
         cudaError_t err = cudaGetLastError();

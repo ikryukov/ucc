@@ -366,12 +366,9 @@ static ucc_status_t ucc_bcast_ce_post_with_stream(cudaStream_t stream, ucc_coll_
     ucc_tl_cuda_team_t *team = TASK_TEAM(task);
     ucc_coll_args_t    *args = &TASK_ARGS(task);
     ucc_datatype_t      dt   = task->bcast_ce.dt;
-    // ucc_tl_cuda_sync_t *sync = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
 
     task->bcast_ce.stream = stream;
     task->bcast_ce.stage  = STAGE_SYNC;
-
-    // set_val_semaphore(task->bcast_ce.stream, &sync->iter_semaphore, -1); // Init but no ready
 
     // in case of active set bcast we need to do additional steps to find free barriers
     if (UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))) {

@@ -40,15 +40,7 @@ static inline ucc_status_t ucc_tl_cuda_bcast_ce_setup_start(ucc_tl_cuda_task_t *
     set_rank_step(task, trank, 0, 0); // Initialize rank step tracking
     ucc_memory_cpu_store_fence();
     // initiate barrier wait while all ranks set theirs steps to 0
-    status = ucc_tl_cuda_shm_barrier_start(UCC_TL_TEAM_RANK(team), task->bar);
-    if (ucc_unlikely(status != UCC_OK)) {
-        goto exit_err;
-    }
-
-    return UCC_OK;
-
-exit_err:
-    return status;
+    return ucc_tl_cuda_shm_barrier_start(UCC_TL_TEAM_RANK(team), task->bar);
 }
 
 // Tests if setup is complete for a copy engine broadcast task

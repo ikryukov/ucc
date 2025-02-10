@@ -35,7 +35,6 @@ static inline ucc_status_t ucc_tl_cuda_bcast_ce_setup_start(ucc_tl_cuda_task_t *
 {
     ucc_tl_cuda_team_t *team  = TASK_TEAM(task);
     ucc_rank_t          trank = UCC_TL_TEAM_RANK(team);
-    ucc_status_t        status;
 
     set_rank_step(task, trank, 0, 0); // Initialize rank step tracking
     ucc_memory_cpu_store_fence();
@@ -356,7 +355,7 @@ static ucc_status_t ucc_bcast_ce_post_with_stream(cudaStream_t stream, ucc_coll_
 {
     ucc_tl_cuda_task_t *task = ucc_derived_of(coll_task, ucc_tl_cuda_task_t);
     ucc_tl_cuda_team_t *team = TASK_TEAM(task);
-    ucc_coll_args_t    *args = &TASK_ARGS(task);
+    // ucc_coll_args_t    *args = &TASK_ARGS(task);
     ucc_datatype_t      dt   = task->bcast_ce.dt;
 
     task->bcast_ce.stream = stream;
@@ -369,9 +368,9 @@ static ucc_status_t ucc_bcast_ce_post_with_stream(cudaStream_t stream, ucc_coll_
                                    : STAGE_FIND_BAR_PEER;
     }
 
-    task->bcast_ce.size = ucc_dt_size(dt) * args->src.info.count;
-    task->bcast_ce.num_steps = ucc_div_round_up(task->bcast_ce.size, get_raw_scratch_size(team));
-    task->bcast_ce.sbuf = args->src.info.buffer;
+    // task->bcast_ce.size = ucc_dt_size(dt) * args->src.info.count;
+    // task->bcast_ce.num_steps = ucc_div_round_up(task->bcast_ce.size, get_raw_scratch_size(team));
+    // task->bcast_ce.sbuf = args->src.info.buffer;
 
     ucc_debug("bcast ce dt: %s, buffer size: %ld, num_steps: %d",
               ucc_datatype_str(dt), task->bcast_ce.size,
@@ -401,6 +400,8 @@ static ucc_status_t ucc_bcast_ce_triggered_post(ucc_ee_h ee, ucc_ev_t *ev, ucc_c
 
     ucc_assert(ee != NULL); // ensure contract
     ucc_assert(ee->ee_type == UCC_EE_CUDA_STREAM);
+    ucc_assert(ee->ee_context != NULL);
+
     coll_task->ee = ee;
 
     ucc_status_t status = ucc_bcast_ce_post_with_stream((cudaStream_t) ee->ee_context, coll_task);
@@ -420,6 +421,9 @@ ucc_status_t ucc_tl_cuda_bcast_ce_init(ucc_base_coll_args_t *coll_args,
                                            ucc_coll_task_t     **task_p)
 {
     ucc_tl_cuda_team_t *team = ucc_derived_of(tl_team, ucc_tl_cuda_team_t);
+    // ucc_tl_cuda_task_t *task = ucc_derived_of(task_p, ucc_tl_cuda_task_t);
+    ucc_coll_args_t    *args = &coll_args->args;
+    ucc_datatype_t      dt   = coll_args->args.src.info.datatype;
     ucc_tl_cuda_task_t *task;
     ucc_status_t        status;
 
@@ -436,9 +440,12 @@ ucc_status_t ucc_tl_cuda_bcast_ce_init(ucc_base_coll_args_t *coll_args,
         return status;
     }
 
+    task->bcast_ce.size = ucc_dt_size(dt) * args->src.info.count;
+    task->bcast_ce.num_steps = ucc_div_round_up(task->bcast_ce.size, get_raw_scratch_size(team));
+    task->bcast_ce.sbuf = args->src.info.buffer;
+
     task->bcast_ce.root = coll_args->args.root;
     task->bcast_ce.dt   = coll_args->args.src.info.datatype;
-    task->bcast_ce.sbuf = coll_args->args.src.info.buffer;
 
     task->super.post           = ucc_bcast_ce_post;
     task->super.triggered_post = ucc_bcast_ce_triggered_post;

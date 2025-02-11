@@ -129,9 +129,11 @@ ucc_status_t ucc_tl_cuda_task_init(ucc_base_coll_args_t *coll_args,
         // currently we support only active set bacst with 2 ranks
         // so root rank should remap phys rank of peer with rank 1
         peer = (task->subset.myrank == coll_args->args.root) ? ucc_ep_map_eval(task->subset.map, 1) : task->subset.myrank;
-        task->bcast_linear.key = compute_key(coll_args->args.root, peer, coll_args->args.tag);
-        task->bcast_ce.key = task->bcast_linear.key;
+        // TODO: bug here bcast_linear and bcast_ce are union in task and we overwrites by key something valuable 
+        //task->bcast_linear.key = compute_key(coll_args->args.root, peer, coll_args->args.tag);        
+        task->bcast_ce.key = compute_key(coll_args->args.root, peer, coll_args->args.tag);
         task->seq_num = team->seq_num_active_set++;
+        task->coll_id = -1; // to trigger assert
     } else {
         task->seq_num = team->seq_num++;
         task->coll_id = task->seq_num % max_concurrent;

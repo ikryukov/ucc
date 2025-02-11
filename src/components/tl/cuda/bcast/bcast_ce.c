@@ -127,10 +127,14 @@ static ucc_status_t ucc_tl_cuda_bcast_ce_finalize(ucc_coll_task_t *coll_task)
     return UCC_OK;
 }
 
+// TODO: multithreaded env + single cuda stream, one task could interfere with another if we use shared semaphore
 static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
 {
     ucc_tl_cuda_team_t *team   = TASK_TEAM(task);
+    // TODO: we can't take sync here because it uses task->coll_id to navigate in shared mem 
     ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
+    ucc_print("task coll id: %d", task->coll_id);
+    ucc_assert(sync != NULL);
     ucc_rank_t          trank  = UCC_TL_TEAM_RANK(team);
     ucc_rank_t          tsize  = UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))
                                      ? (ucc_rank_t)task->subset.map.ep_num
@@ -355,7 +359,6 @@ static ucc_status_t ucc_bcast_ce_post_with_stream(cudaStream_t stream, ucc_coll_
 {
     ucc_tl_cuda_task_t *task = ucc_derived_of(coll_task, ucc_tl_cuda_task_t);
     ucc_tl_cuda_team_t *team = TASK_TEAM(task);
-    // ucc_coll_args_t    *args = &TASK_ARGS(task);
     ucc_datatype_t      dt   = task->bcast_ce.dt;
 
     task->bcast_ce.stream = stream;
@@ -367,10 +370,6 @@ static ucc_status_t ucc_bcast_ce_post_with_stream(cudaStream_t stream, ucc_coll_
                                    ? STAGE_INIT_BAR_ROOT
                                    : STAGE_FIND_BAR_PEER;
     }
-
-    // task->bcast_ce.size = ucc_dt_size(dt) * args->src.info.count;
-    // task->bcast_ce.num_steps = ucc_div_round_up(task->bcast_ce.size, get_raw_scratch_size(team));
-    // task->bcast_ce.sbuf = args->src.info.buffer;
 
     ucc_debug("bcast ce dt: %s, buffer size: %ld, num_steps: %d",
               ucc_datatype_str(dt), task->bcast_ce.size,
@@ -429,9 +428,8 @@ ucc_status_t ucc_tl_cuda_bcast_ce_init(ucc_base_coll_args_t *coll_args,
 
     ucc_print("bcast ce init");
 
-    if (ucc_unlikely(!ucc_tl_cuda_team_topo_is_fully_connected(team->topo) ||
-                     UCC_TL_TEAM_SIZE(team) - 1 >
-                         UCC_EE_EXECUTOR_MULTI_OP_NUM_BUFS)) {
+    if (!ucc_tl_cuda_team_topo_is_fully_connected(team->topo) ||
+        UCC_TL_TEAM_SIZE(team) - 1 > UCC_EE_EXECUTOR_MULTI_OP_NUM_BUFS) {
         return UCC_ERR_NOT_SUPPORTED;
     }
 

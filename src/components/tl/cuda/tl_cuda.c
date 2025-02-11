@@ -122,6 +122,7 @@ bool init_semaphore(stream_semaphore_t *sem)
         ucc_assert(0);
         return false;
     }
+    ucc_debug("init_semaphore %p: { host_val = %d, dev_sem_val_ptr = %lld }", sem, sem->host_val, sem->dev_sem_val_ptr);
     return true;
 }
 

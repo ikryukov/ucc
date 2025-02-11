@@ -286,6 +286,9 @@ ucc_status_t ucc_tl_cuda_team_create_test(ucc_base_team_t *tl_team)
                             resource_num);
     CUDA_CHECK_GOTO(cudaStreamCreateWithFlags(&team->stream,
                     cudaStreamNonBlocking), exit_err, status);
+    
+    ucc_debug("max_concurent: %d resource_num: %d", lib->cfg.max_concurrent, resource_num);
+
     for (i = 0; i < resource_num; i++) {
         sync = UCC_TL_CUDA_TEAM_SYNC(team, UCC_TL_TEAM_RANK(team), i);
         CUDA_CHECK_GOTO(cudaEventCreateWithFlags(&sync->ipc_event_local,

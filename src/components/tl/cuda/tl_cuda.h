@@ -155,14 +155,35 @@ typedef struct ucc_tl_cuda_rank_id {
     int                         shm;
 } ucc_tl_cuda_rank_id_t;
 
+typedef struct ucc_tl_cuda_local_semaphores {
+    stream_semaphore_t iter_semaphore;
+    stream_semaphore_t done_semaphore;
+} ucc_tl_cuda_local_semaphores_t;
+
+typedef struct ucc_tl_cuda_remote_semaphores {
+    remote_semaphore_t iter_semaphore;
+    remote_semaphore_t done_semaphore;
+} ucc_tl_cuda_remote_semaphores_t;
+typedef struct ucc_tl_cuda_local_semaphores_block {
+    ucc_tl_cuda_local_semaphores_t iam_root[UCC_TL_CUDA_MAX_PEERS];
+    ucc_tl_cuda_local_semaphores_t iam_peer[UCC_TL_CUDA_MAX_PEERS];
+} ucc_tl_cuda_local_semaphores_block_t;
+
+typedef struct ucc_tl_cuda_remote_semaphores_block {
+    ucc_tl_cuda_remote_semaphores_t iam_root[UCC_TL_CUDA_MAX_PEERS][UCC_TL_CUDA_MAX_PEERS];
+    ucc_tl_cuda_remote_semaphores_t iam_peer[UCC_TL_CUDA_MAX_PEERS][UCC_TL_CUDA_MAX_PEERS];
+} ucc_tl_cuda_remote_semaphores_block_t;
+
 typedef struct ucc_tl_cuda_sync {
     int                    seq_num[UCC_TL_CUDA_MAX_RING_CHUNKS];
     ucc_tl_cuda_mem_info_t mem_info_src;
     ucc_tl_cuda_mem_info_t mem_info_dst;
     cudaEvent_t            ipc_event_local;
     cudaIpcEventHandle_t   ev_handle;
-    stream_semaphore_t     iter_semaphore;
-    stream_semaphore_t     done_semaphore;
+
+    ucc_tl_cuda_local_semaphores_block_t local_semaphores;
+    ucc_tl_cuda_remote_semaphores_block_t remote_semaphores;
+
     union {
         struct {
             size_t sbytes[UCC_TL_CUDA_MAX_PEERS];

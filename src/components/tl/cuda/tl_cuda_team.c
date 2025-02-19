@@ -298,8 +298,22 @@ ucc_status_t ucc_tl_cuda_team_create_test(ucc_base_team_t *tl_team)
         CUDA_CHECK_GOTO(cudaIpcGetEventHandle(&sync->ev_handle,
                                              sync->ipc_event_local),
                         exit_err, status);
-        init_semaphore(&sync->iter_semaphore);
-        init_semaphore(&sync->done_semaphore);
+        // init_semaphore(&sync->iter_semaphore);
+        // init_semaphore(&sync->done_semaphore);
+    }
+
+    // local semaphores
+    {
+        sync = UCC_TL_CUDA_TEAM_SYNC(team, UCC_TL_TEAM_RANK(team), 0);        
+        for (i = 0; i < UCC_TL_CUDA_MAX_PEERS; ++i)
+        {
+            // root
+            init_semaphore(&sync->local_semaphores.iam_root[i].iter_semaphore);
+            init_semaphore(&sync->local_semaphores.iam_root[i].done_semaphore);
+            // peer
+            init_semaphore(&sync->local_semaphores.iam_peer[i].iter_semaphore);
+            init_semaphore(&sync->local_semaphores.iam_peer[i].done_semaphore);
+        }
     }
 
     ucc_memory_cpu_store_fence();
@@ -329,10 +343,31 @@ barrier:
             CUDA_CHECK_GOTO(cudaIpcOpenEventHandle(&sync->data[j].ipc_event_remote,
                                                    peer_sync->ev_handle),
                             exit_err, status);
-            init_remote_semaphore(&sync->data[j].remote_iter_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, j, i)->iter_semaphore.host_val);
-            init_remote_semaphore(&sync->data[j].remote_done_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, j, i)->done_semaphore.host_val);
+            // init_remote_semaphore(&sync->data[j].remote_iter_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, j, i)->iter_semaphore.host_val);
+            // init_remote_semaphore(&sync->data[j].remote_done_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, j, i)->done_semaphore.host_val);
         }
     }
+
+    // remote semaphores
+    {
+        sync = UCC_TL_CUDA_TEAM_SYNC(team, UCC_TL_TEAM_RANK(team), 0);
+        for (i = 0; i < UCC_TL_TEAM_SIZE(team); ++i)
+        {
+            if (i == UCC_TL_TEAM_RANK(team)) {
+                continue;
+            }
+            for (j = 0; j < UCC_TL_TEAM_SIZE(team); ++j)
+            {
+                // root
+                init_remote_semaphore(&sync->remote_semaphores.iam_root[i][j].iter_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, i, 0)->local_semaphores.iam_root[j].iter_semaphore.host_val);
+                init_remote_semaphore(&sync->remote_semaphores.iam_root[i][j].done_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, i, 0)->local_semaphores.iam_root[j].done_semaphore.host_val);
+                // peer
+                init_remote_semaphore(&sync->remote_semaphores.iam_peer[i][j].iter_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, i, 0)->local_semaphores.iam_peer[j].iter_semaphore.host_val);
+                init_remote_semaphore(&sync->remote_semaphores.iam_peer[i][j].done_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, i, 0)->local_semaphores.iam_peer[j].done_semaphore.host_val);
+            }
+        }
+    }
+
     team->oob_req = NULL;
     tl_debug(tl_team->context->lib, "initialized tl team: %p", team);
     return UCC_OK;

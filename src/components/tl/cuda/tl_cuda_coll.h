@@ -91,7 +91,7 @@ static inline uint64_t compute_key(ucc_rank_t root, ucc_rank_t peer, uint16_t ta
 {
     assert(peer < (1 << 24));
     assert(root < (1 << 24));
-    return (uint64_t)tag << 48 | root << 24 | peer;
+    return (uint64_t)tag << 48 | (uint64_t)root << 24 | (uint64_t)peer;
 }
 
 static inline
@@ -133,7 +133,7 @@ ucc_status_t ucc_tl_cuda_task_init(ucc_base_coll_args_t *coll_args,
         //task->bcast_linear.key = compute_key(coll_args->args.root, peer, coll_args->args.tag);        
         task->bcast_ce.key = compute_key(coll_args->args.root, peer, coll_args->args.tag);
         task->seq_num = team->seq_num_active_set++;
-        task->coll_id = -1; // to trigger assert
+        task->coll_id = 0; // force zero for active set ce implementation
     } else {
         task->seq_num = team->seq_num++;
         task->coll_id = task->seq_num % max_concurrent;

@@ -68,8 +68,9 @@ static inline ucc_status_t root_find_free_barrier(ucc_tl_cuda_task_t *task)
     for (i = 0; i < max_concurrent; ++i) {
         curr_bar = UCC_TL_CUDA_TEAM_BARRIER(team, max_concurrent + i);
         // try to set user specified tag to mark that this barrier is used by this task
+        // TODO: add intermediate step
         if (ucc_atomic_cswap64(&curr_bar->tag, UCC_TL_CUDA_TAG_FREE,
-                               task->bcast_ce.key) == UCC_TL_CUDA_TAG_FREE) {
+                               UCC_TL_CUDA_TAG_INTER) == UCC_TL_CUDA_TAG_FREE) {
             ucc_debug("Acquire barrier: %p idx: %d marked with tag: %ld",
                       curr_bar, i, curr_bar->tag);
             task->bar = curr_bar;
@@ -80,6 +81,9 @@ static inline ucc_status_t root_find_free_barrier(ucc_tl_cuda_task_t *task)
                 ucc_error("failed to init root barrier");
                 return UCC_ERR_NO_RESOURCE;
             }
+            // TODO: add mem bar for arm
+            task->bar->tag = task->bcast_ce.key;
+
             // Assign a collective ID (index of barrier)
             task->coll_id = i + max_concurrent;
             return UCC_OK;
@@ -268,11 +272,11 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
         // no free barriers found by root, try next time
         return;
     case STAGE_SYNC:
-        // if (ucc_tl_cuda_get_sync_root(task, task->bcast_ce.root) != UCC_OK) {
-        //     return;
-        // }
-        // st = ucc_tl_cuda_bcast_ce_setup_start(task);
-        st = ucc_tl_cuda_shm_barrier_start(trank, task->bar);
+        if (ucc_tl_cuda_get_sync_root(task, task->bcast_ce.root) != UCC_OK) {
+            return;
+        }
+        st = ucc_tl_cuda_bcast_ce_setup_start(task);
+        // st = ucc_tl_cuda_shm_barrier_start(trank, task->bar);
         if (st != UCC_OK) {
             task->super.status = st;
             return;
@@ -296,6 +300,9 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
             {
                 ucc_print("cuda stage finished");
                 task->bcast_ce.stage = STAGE_WAIT_ALL;
+                // temp
+                task->super.status = UCC_OK;
+                return;
             } else if (status == cudaErrorNotReady) {
                 // if (trank == task->bcast_ce.root) {
                     // int32_t peer = task->bcast_ce.root ^ 1;
@@ -339,9 +346,8 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
                 ucc_debug("Release bar: %p with tag: %ld", task->bar,
                         task->bar->tag);
                 task->bar->tag = UCC_TL_CUDA_TAG_FREE;
-            }
-            
-            // ucc_tl_cuda_put_sync_root(task, task->bcast_ce.root);
+                ucc_tl_cuda_put_sync_root(task, task->bcast_ce.root);
+            }           
 
             cudaEventDestroy(task->bcast_ce.evtCompletion);
 
@@ -361,14 +367,14 @@ static ucc_status_t ucc_bcast_ce_post_with_stream(cudaStream_t stream, ucc_coll_
     ucc_datatype_t      dt   = task->bcast_ce.dt;
 
     task->bcast_ce.stream = stream;
-    task->bcast_ce.stage  = STAGE_SYNC;
+    task->bcast_ce.stage  = STAGE_WAIT_COPY;
 
-    // in case of active set bcast we need to do additional steps to find free barriers
-    if (UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))) {
-        task->bcast_ce.stage = UCC_TL_TEAM_RANK(team) == task->bcast_ce.root
-                                   ? STAGE_INIT_BAR_ROOT
-                                   : STAGE_FIND_BAR_PEER;
-    }
+    // // in case of active set bcast we need to do additional steps to find free barriers
+    // if (UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))) {
+    //     task->bcast_ce.stage = UCC_TL_TEAM_RANK(team) == task->bcast_ce.root
+    //                                ? STAGE_INIT_BAR_ROOT
+    //                                : STAGE_FIND_BAR_PEER;
+    // }
 
     ucc_debug("bcast ce dt: %s, buffer size: %ld, num_steps: %d",
               ucc_datatype_str(dt), task->bcast_ce.size,

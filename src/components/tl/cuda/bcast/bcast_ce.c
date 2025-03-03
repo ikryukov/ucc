@@ -48,7 +48,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
     eventAttrib.version = NVTX_VERSION;
     eventAttrib.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
     eventAttrib.messageType = NVTX_MESSAGE_TYPE_ASCII;
-    eventAttrib.message.ascii = "Bcast CE Range";
+    eventAttrib.message.ascii = trank == task->bcast_ce.root ? "Bcast CE Range: send" : "Bcast CE Range: recv";
 
     nvtxRangeId_t rangeId = nvtxRangeStartEx(&eventAttrib);
     task->bcast_ce.profilerId = rangeId;

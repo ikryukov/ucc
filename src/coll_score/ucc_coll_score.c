@@ -687,6 +687,7 @@ static ucc_status_t ucc_coll_score_parse_str(const char *str,
             continue;
         }
         /* if we get there then we could not match token to any field */
+        ucc_error("failed to parse UCC_*_TUNE parameter: %s", tokens[i]);
         status = UCC_ERR_INVALID_PARAM;
 
         //TODO add parsing of msg ranges and team size ranges
@@ -815,7 +816,7 @@ ucc_status_t ucc_coll_score_alloc_from_str(const char *            str,
     *score_p = score;
     return UCC_OK;
 error_msg:
-    ucc_error("failed to parse UCC_*_TUNE parameter: %s", tokens[i]);
+    ucc_error("failed to parse UCC_*_TUNE parameter: %s with status: %s", tokens[i], ucc_status_string(status));
 error:
     *score_p = NULL;
     ucc_coll_score_free(score);

@@ -82,6 +82,7 @@ void set_val_semaphore(cudaStream_t stream, stream_semaphore_t* sem, int32_t val
 
 bool init_remote_semaphore(remote_semaphore_t* sem, CUdeviceptr remote_sem_devptr);
 bool wait_remote_semaphore(cudaStream_t stream, remote_semaphore_t* sem, int32_t value);
+void set_val_remote_semaphore(cudaStream_t stream, remote_semaphore_t *sem, int32_t value);
 
 typedef struct ucc_tl_cuda_iface {
     ucc_tl_iface_t super;

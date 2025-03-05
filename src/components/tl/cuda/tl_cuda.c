@@ -13,6 +13,12 @@
 #include "reduce_scatter/reduce_scatter.h"
 #include "reduce_scatterv/reduce_scatterv.h"
 
+ucc_status_t
+post_wait_kernel(cudaStream_t stream, CUdeviceptr addr, uint32_t val);
+
+ucc_status_t
+post_write_kernel(cudaStream_t stream, CUdeviceptr addr, uint32_t val);
+
 static ucc_config_field_t ucc_tl_cuda_lib_config_table[] = {
     {"", "", NULL, ucc_offsetof(ucc_tl_cuda_lib_config_t, super),
      UCC_CONFIG_TYPE_TABLE(ucc_tl_lib_config_table)},
@@ -136,14 +142,15 @@ bool wait_semaphore(cudaStream_t stream, stream_semaphore_t *sem, int32_t value)
 {
     ucc_assert(sem != NULL);
     ucc_assert(sem->dev_sem_val_ptr);
-    CUresult res = cuStreamWaitValue32(stream, sem->dev_sem_val_ptr, value,
-                                       CU_STREAM_WAIT_VALUE_EQ);
-    if (res != CUDA_SUCCESS) {
-        cudaError_t err = cudaGetLastError();
-        ucc_error("cuStreamWaitValue32 failed with code: %d %s", res, cudaGetErrorString(err));
-        ucc_assert(0);
-        return false;
-    }
+    // CUresult res = cuStreamWaitValue32(stream, sem->dev_sem_val_ptr, value,
+    //                                    CU_STREAM_WAIT_VALUE_EQ);
+    // if (res != CUDA_SUCCESS) {
+    //     cudaError_t err = cudaGetLastError();
+    //     ucc_error("cuStreamWaitValue32 failed with code: %d %s", res, cudaGetErrorString(err));
+    //     ucc_assert(0);
+    //     return false;
+    // }
+    post_wait_kernel(stream, sem->dev_sem_val_ptr, value);
     return true;
 }
 
@@ -183,4 +190,19 @@ bool wait_remote_semaphore(cudaStream_t stream, remote_semaphore_t* sem, int32_t
         return false;
     }
     return true;
+}
+
+void set_val_remote_semaphore(cudaStream_t stream, remote_semaphore_t *sem, int32_t value)
+{
+    ucc_assert(sem != NULL);
+    ucc_assert(sem->dev_sem_val_ptr);
+    post_write_kernel(stream, sem->dev_sem_val_ptr, value);
+    
+    // CUresult res = cuStreamWriteValue32(stream, sem->dev_sem_val_ptr, value, 0);
+    // if (res != CUDA_SUCCESS) {
+    //     cudaError_t err = cudaGetLastError();
+    //     ucc_error("set_val_remote_semaphore cuStreamWriteValue32 failed with code: %d %s", res, cudaGetErrorString(err));
+    //     ucc_assert(0);
+    //     return;
+    // }
 }

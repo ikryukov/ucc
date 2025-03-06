@@ -142,15 +142,15 @@ bool wait_semaphore(cudaStream_t stream, stream_semaphore_t *sem, int32_t value)
 {
     ucc_assert(sem != NULL);
     ucc_assert(sem->dev_sem_val_ptr);
-    // CUresult res = cuStreamWaitValue32(stream, sem->dev_sem_val_ptr, value,
-    //                                    CU_STREAM_WAIT_VALUE_EQ);
-    // if (res != CUDA_SUCCESS) {
-    //     cudaError_t err = cudaGetLastError();
-    //     ucc_error("cuStreamWaitValue32 failed with code: %d %s", res, cudaGetErrorString(err));
-    //     ucc_assert(0);
-    //     return false;
-    // }
-    post_wait_kernel(stream, sem->dev_sem_val_ptr, value);
+    CUresult res = cuStreamWaitValue32(stream, sem->dev_sem_val_ptr, value,
+                                       CU_STREAM_WAIT_VALUE_EQ);
+    if (res != CUDA_SUCCESS) {
+        cudaError_t err = cudaGetLastError();
+        ucc_error("cuStreamWaitValue32 failed with code: %d %s", res, cudaGetErrorString(err));
+        ucc_assert(0);
+        return false;
+    }
+    // post_wait_kernel(stream, sem->dev_sem_val_ptr, value);
     return true;
 }
 
@@ -196,13 +196,13 @@ void set_val_remote_semaphore(cudaStream_t stream, remote_semaphore_t *sem, int3
 {
     ucc_assert(sem != NULL);
     ucc_assert(sem->dev_sem_val_ptr);
-    post_write_kernel(stream, sem->dev_sem_val_ptr, value);
-    
-    // CUresult res = cuStreamWriteValue32(stream, sem->dev_sem_val_ptr, value, 0);
-    // if (res != CUDA_SUCCESS) {
-    //     cudaError_t err = cudaGetLastError();
-    //     ucc_error("set_val_remote_semaphore cuStreamWriteValue32 failed with code: %d %s", res, cudaGetErrorString(err));
-    //     ucc_assert(0);
-    //     return;
-    // }
+    // post_write_kernel(stream, sem->dev_sem_val_ptr, value);
+
+    CUresult res = cuStreamWriteValue32(stream, sem->dev_sem_val_ptr, value, 0);
+    if (res != CUDA_SUCCESS) {
+        cudaError_t err = cudaGetLastError();
+        ucc_error("set_val_remote_semaphore cuStreamWriteValue32 failed with code: %d %s", res, cudaGetErrorString(err));
+        ucc_assert(0);
+        return;
+    }
 }

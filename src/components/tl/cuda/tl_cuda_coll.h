@@ -45,6 +45,19 @@ extern const char
         (PTR_OFFSET(_scratch, (_task)->coll_id * _scratch_size));              \
     })
 
+#define TEAM_SCRATCH_CTRL(_team, _rank)                                        \
+    ({                                                                         \
+        size_t _scratch_data_size = UCC_TL_CUDA_TEAM_LIB(_team)->cfg.scratch_data_size;  \
+        void *_scratch;                                                        \
+        if (_rank == UCC_TL_TEAM_RANK(_team)) {                                \
+            _scratch = _team->scratch.loc;                                     \
+        } else {                                                               \
+            _scratch = PTR_OFFSET(_team->scratch.rem[_rank],                   \
+                                  _team->scratch.rem_info[_rank].offset);      \
+        }                                                                      \
+        (PTR_OFFSET(_scratch, _scratch_data_size));                            \
+    })
+
 static inline void ucc_tl_cuda_task_reset(ucc_tl_cuda_task_t *task)
 {
     task->super.status = UCC_INPROGRESS;

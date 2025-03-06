@@ -10,13 +10,12 @@
 #include "core/ucc_ee.h"
 #include "utils/arch/cuda_def.h"
 
-#include <nvToolsExt.h>
-
+#include <nvtx3/nvToolsExt.h>
 
 // Returns the size of the scratch buffer used for data transfers
 static inline size_t get_raw_scratch_size(ucc_tl_cuda_team_t *team)
 {
-    return UCC_TL_CUDA_TEAM_LIB(team)->cfg.scratch_size;
+    return UCC_TL_CUDA_TEAM_LIB(team)->cfg.scratch_data_size;
 }
 
 static ucc_status_t ucc_tl_cuda_bcast_ce_finalize(ucc_coll_task_t *coll_task)
@@ -33,7 +32,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
     ucc_tl_cuda_team_t *team   = TASK_TEAM(task);
     // TODO: we can't take sync here because it uses task->coll_id to navigate in shared mem 
     ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
-    ucc_print("task coll id: %d", task->coll_id);
+    // ucc_debug("task coll id: %d", task->coll_id);
     ucc_assert(sync != NULL);
     ucc_rank_t          trank  = UCC_TL_TEAM_RANK(team);
     ucc_rank_t          tsize  = UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))
@@ -53,7 +52,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
 
     nvtxRangeId_t rangeId = nvtxRangeStartEx(&eventAttrib);
     task->bcast_ce.profilerId = rangeId;
-    
+
     CUDA_CHECK_GOTO(cudaEventCreateWithFlags(&task->bcast_ce.evtCompletion,
                                              cudaEventDisableTiming),
                     exit_err, status);

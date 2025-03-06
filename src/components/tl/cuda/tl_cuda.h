@@ -69,20 +69,18 @@
 #define UCC_TL_CUDA_PROFILE_REQUEST_FREE  UCC_PROFILE_REQUEST_FREE
 
 typedef struct stream_semaphore {
-  int32_t host_val;
   CUdeviceptr dev_sem_val_ptr;
 } stream_semaphore_t;
 
 typedef struct remote_semaphore {
-  int32_t* host_val_ptr;
   CUdeviceptr dev_sem_val_ptr; 
 } remote_semaphore_t;
 
-bool init_semaphore(stream_semaphore_t* sem);
+bool init_semaphore(stream_semaphore_t *sem, CUdeviceptr sem_devptr);
 bool wait_semaphore(cudaStream_t stream, stream_semaphore_t* sem, int32_t value);
 void set_val_semaphore(cudaStream_t stream, stream_semaphore_t* sem, int32_t value);
 
-bool init_remote_semaphore(remote_semaphore_t* sem, int32_t* remote_val);
+bool init_remote_semaphore(remote_semaphore_t* sem, CUdeviceptr remote_sem_devptr);
 bool wait_remote_semaphore(cudaStream_t stream, remote_semaphore_t* sem, int32_t value);
 
 typedef struct ucc_tl_cuda_iface {
@@ -94,7 +92,8 @@ extern ucc_tl_cuda_iface_t ucc_tl_cuda;
 typedef struct ucc_tl_cuda_lib_config {
     ucc_tl_lib_config_t super;
     uint32_t            max_concurrent; // Maximum number of tasks that can be progressed simultaneously.
-    size_t              scratch_size;
+    size_t              scratch_size; // Total scratch size 
+    size_t              scratch_data_size; // first part is for data, second is for control
     unsigned long       allgather_ring_max_rings;
     uint32_t            allgather_ring_num_chunks;
     unsigned long       reduce_scatter_ring_max_rings;
@@ -181,7 +180,6 @@ typedef struct ucc_tl_cuda_sync {
     ucc_tl_cuda_mem_info_t mem_info_dst;
     cudaEvent_t            ipc_event_local;
     cudaIpcEventHandle_t   ev_handle;
-
     ucc_tl_cuda_local_semaphores_block_t local_semaphores;
     ucc_tl_cuda_remote_semaphores_block_t remote_semaphores;
 
@@ -195,6 +193,15 @@ typedef struct ucc_tl_cuda_sync {
     };
     ucc_tl_cuda_sync_data_t data[1];
 } ucc_tl_cuda_sync_t;
+
+typedef struct ucc_tl_cuda_gpu_sem {
+    uint32_t iter;
+    uint32_t done;
+} ucc_tl_cuda_gpu_sem_t;
+typedef struct ucc_tl_cuda_gpu_ctrl {
+    ucc_tl_cuda_gpu_sem_t iam_root[UCC_TL_CUDA_MAX_PEERS];
+    ucc_tl_cuda_gpu_sem_t iam_peer[UCC_TL_CUDA_MAX_PEERS];
+} ucc_tl_cuda_gpu_ctrl_t;
 
 typedef struct ucc_tl_cuda_scratch {
     void                  *loc;                             // Local CUDA memory for current rank

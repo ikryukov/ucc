@@ -10,6 +10,8 @@
 #include "core/ucc_ee.h"
 #include "utils/arch/cuda_def.h"
 
+#include <nvToolsExt.h>
+
 
 // Returns the size of the scratch buffer used for data transfers
 static inline size_t get_raw_scratch_size(ucc_tl_cuda_team_t *team)
@@ -43,14 +45,21 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
     ucc_status_t        status;
     int i, step, peer;
 
+    nvtxEventAttributes_t eventAttrib = {0};
+    eventAttrib.version = NVTX_VERSION;
+    eventAttrib.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    eventAttrib.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    eventAttrib.message.ascii = "Bcast CE Range";
+
+    nvtxRangeId_t rangeId = nvtxRangeStartEx(&eventAttrib);
+    task->bcast_ce.profilerId = rangeId;
+    
     CUDA_CHECK_GOTO(cudaEventCreateWithFlags(&task->bcast_ce.evtCompletion,
                                              cudaEventDisableTiming),
                     exit_err, status);
 
     if (trank == task->bcast_ce.root) {
-        ucc_print("hello from root [%d] / tsize = %d", trank, tsize);
         // root
-
         // find peer 
         for (i = 0; i < tsize; ++i)
         {
@@ -65,6 +74,8 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
             }
             break;
         }
+        
+        ucc_debug("hello from root [%d] peer [%d] / tsize = %d", trank, peer, tsize);
 
         ucc_tl_cuda_local_semaphores_t* sem = &sync->local_semaphores.iam_root[peer];
         stream_semaphore_t* iter_semaphore = &sem->iter_semaphore;
@@ -103,7 +114,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
                         exit_err, status);
     } else {
         // peer scenario
-        ucc_print("hello from peer [%d] / tsize = %d", trank, tsize);
+        ucc_debug("hello from peer [%d] root [%d] / tsize = %d", trank, task->bcast_ce.root, tsize);
         stream_semaphore_t* iter_semaphore = &sync->local_semaphores.iam_peer[task->bcast_ce.root].iter_semaphore;
         remote_semaphore_t* root_iter_semaphore = &sync->remote_semaphores.iam_root[task->bcast_ce.root][trank].iter_semaphore;
         remote_semaphore_t* root_done_semaphore = &sync->remote_semaphores.iam_root[task->bcast_ce.root][trank].done_semaphore;
@@ -143,7 +154,12 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
     cudaError_t         cuda_status = cudaEventQuery(task->bcast_ce.evtCompletion);
 
     if (cuda_status == cudaSuccess) {
-        ucc_print("cuda stage finished");
+        ucc_debug("cuda stage finished");
+        // TODO: delete evt
+        ucc_status_t        status;
+        CUDA_CHECK_GOTO(cudaEventDestroy(task->bcast_ce.evtCompletion),
+            exit_err, status);
+        nvtxRangeEnd(task->bcast_ce.profilerId);  // End the range
         task->super.status = UCC_OK;
     } else if (cuda_status == cudaErrorNotReady) {
         // still in progress
@@ -153,6 +169,11 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
         task->super.status = UCC_ERR_NO_MESSAGE;
         ucc_assert(0);
     }
+    return;
+
+exit_err:
+    ucc_error("error ucc_tl_cuda_bcast_ce_progress!");
+    ucc_assert(0);
 }
 
 static ucc_status_t ucc_bcast_ce_post_with_stream(cudaStream_t stream, ucc_coll_task_t *coll_task)
@@ -195,6 +216,8 @@ static ucc_status_t ucc_bcast_ce_triggered_post(ucc_ee_h ee, ucc_ev_t *ev, ucc_c
 
     coll_task->ee = ee;
 
+
+
     ucc_status_t status = ucc_bcast_ce_post_with_stream((cudaStream_t) ee->ee_context, coll_task);
     if (ucc_likely(status == UCC_OK)) {
         post_event.ev_type         = UCC_EVENT_COLLECTIVE_POST;
@@ -218,6 +241,8 @@ ucc_status_t ucc_tl_cuda_bcast_ce_init(ucc_base_coll_args_t *coll_args,
     ucc_status_t        status;
 
     ucc_print("bcast ce init");
+
+
 
     if (!ucc_tl_cuda_team_topo_is_fully_connected(team->topo) ||
         UCC_TL_TEAM_SIZE(team) - 1 > UCC_EE_EXECUTOR_MULTI_OP_NUM_BUFS) {

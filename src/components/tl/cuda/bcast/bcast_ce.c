@@ -156,11 +156,10 @@ static void ucc_tl_cuda_bcast_ce_progress(ucc_coll_task_t *coll_task)
 
     if (cuda_status == cudaSuccess) {
         ucc_debug("cuda stage finished");
-        // TODO: delete evt
-        ucc_status_t        status;
+        ucc_status_t status;
         CUDA_CHECK_GOTO(cudaEventDestroy(task->bcast_ce.evtCompletion),
-            exit_err, status);
-        nvtxRangeEnd(task->bcast_ce.profilerId);  // End the range
+                        exit_err, status);
+        nvtxRangeEnd(task->bcast_ce.profilerId); // End the range
         task->super.status = UCC_OK;
     } else if (cuda_status == cudaErrorNotReady) {
         // still in progress

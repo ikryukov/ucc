@@ -118,23 +118,6 @@ bool init_semaphore(stream_semaphore_t *sem, CUdeviceptr sem_devptr)
     ucc_assert(sem != NULL);
     ucc_assert(sem_devptr);
     sem->dev_sem_val_ptr = sem_devptr;
-    // sem->host_val = -1; // TODO: pass init value?
-    // ucc_memory_cpu_store_fence();
-    // CUresult res  = cuMemHostRegister(&sem->host_val, sizeof(sem->host_val),
-    //                                  CU_MEMHOSTREGISTER_DEVICEMAP);
-    // if (res != CUDA_SUCCESS) {
-    //     ucc_error("Failed to cuMemHostRegister!");
-    //     ucc_assert(0);
-    //     return false;
-    // }
-    // res = cuMemHostGetDevicePointer(&sem->dev_sem_val_ptr, &sem->host_val,
-    //                                 0 /* flags */);
-    // if (res != CUDA_SUCCESS) {
-    //     ucc_error("cuMemHostGetDevicePointer failed!");
-    //     ucc_assert(0);
-    //     return false;
-    // }
-    // ucc_debug("init_semaphore %p: { host_val = %d, host_val_ptr = %p, dev_sem_val_ptr = %lld }", sem, sem->host_val, &sem->host_val, sem->dev_sem_val_ptr);
     return true;
 }
 
@@ -171,10 +154,8 @@ bool init_remote_semaphore(remote_semaphore_t* sem, CUdeviceptr remote_sem_devpt
 {
     assert(sem);
     assert(remote_sem_devptr);
-    // sem->host_val_ptr = remote_val;
     ucc_debug("init_remote_semaphore remote_sem_devptr: %lld", remote_sem_devptr);
     sem->dev_sem_val_ptr = remote_sem_devptr;
-
     return true;
 }
 

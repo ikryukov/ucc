@@ -304,15 +304,27 @@ ucc_status_t ucc_tl_cuda_team_create_test(ucc_base_team_t *tl_team)
 
     // local semaphores
     {
-        sync = UCC_TL_CUDA_TEAM_SYNC(team, UCC_TL_TEAM_RANK(team), 0);        
+        sync = UCC_TL_CUDA_TEAM_SYNC(team, UCC_TL_TEAM_RANK(team), 0);
+        ucc_tl_cuda_gpu_ctrl_t* ctrl = TEAM_SCRATCH_CTRL(team, UCC_TL_TEAM_RANK(team));
+        ucc_tl_cuda_gpu_ctrl_t host = { 0 };
+        for (i = 0; i < UCC_TL_CUDA_MAX_PEERS; ++i)
+        {
+            host.iam_root[i].iter = -1;
+            host.iam_root[i].done = -1;
+            
+            host.iam_peer[i].iter = -1;
+            host.iam_peer[i].done = -1;
+        }
+        cudaMemcpy(ctrl, &host, sizeof(ucc_tl_cuda_gpu_ctrl_t), cudaMemcpyHostToDevice);
+
         for (i = 0; i < UCC_TL_CUDA_MAX_PEERS; ++i)
         {
             // root
-            init_semaphore(&sync->local_semaphores.iam_root[i].iter_semaphore);
-            init_semaphore(&sync->local_semaphores.iam_root[i].done_semaphore);
+            init_semaphore(&sync->local_semaphores.iam_root[i].iter_semaphore, (CUdeviceptr) &ctrl->iam_root[i].iter);
+            init_semaphore(&sync->local_semaphores.iam_root[i].done_semaphore, (CUdeviceptr) &ctrl->iam_root[i].done);
             // peer
-            init_semaphore(&sync->local_semaphores.iam_peer[i].iter_semaphore);
-            init_semaphore(&sync->local_semaphores.iam_peer[i].done_semaphore);
+            init_semaphore(&sync->local_semaphores.iam_peer[i].iter_semaphore, (CUdeviceptr) &ctrl->iam_peer[i].iter);
+            init_semaphore(&sync->local_semaphores.iam_peer[i].done_semaphore, (CUdeviceptr) &ctrl->iam_peer[i].done);
         }
     }
 
@@ -351,6 +363,7 @@ barrier:
     // remote semaphores
     {
         sync = UCC_TL_CUDA_TEAM_SYNC(team, UCC_TL_TEAM_RANK(team), 0);
+
         for (i = 0; i < UCC_TL_TEAM_SIZE(team); ++i)
         {
             if (i == UCC_TL_TEAM_RANK(team)) {
@@ -358,12 +371,13 @@ barrier:
             }
             for (j = 0; j < UCC_TL_TEAM_SIZE(team); ++j)
             {
+                ucc_tl_cuda_gpu_ctrl_t* peer_ctrl = TEAM_SCRATCH_CTRL(team, i);
                 // root
-                init_remote_semaphore(&sync->remote_semaphores.iam_root[i][j].iter_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, i, 0)->local_semaphores.iam_root[j].iter_semaphore.host_val);
-                init_remote_semaphore(&sync->remote_semaphores.iam_root[i][j].done_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, i, 0)->local_semaphores.iam_root[j].done_semaphore.host_val);
+                init_remote_semaphore(&sync->remote_semaphores.iam_root[i][j].iter_semaphore, (CUdeviceptr) &peer_ctrl->iam_root[j].iter);
+                init_remote_semaphore(&sync->remote_semaphores.iam_root[i][j].done_semaphore, (CUdeviceptr) &peer_ctrl->iam_root[j].done);
                 // peer
-                init_remote_semaphore(&sync->remote_semaphores.iam_peer[i][j].iter_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, i, 0)->local_semaphores.iam_peer[j].iter_semaphore.host_val);
-                init_remote_semaphore(&sync->remote_semaphores.iam_peer[i][j].done_semaphore, &UCC_TL_CUDA_TEAM_SYNC(team, i, 0)->local_semaphores.iam_peer[j].done_semaphore.host_val);
+                init_remote_semaphore(&sync->remote_semaphores.iam_peer[i][j].iter_semaphore, (CUdeviceptr) &peer_ctrl->iam_peer[j].iter);
+                init_remote_semaphore(&sync->remote_semaphores.iam_peer[i][j].done_semaphore, (CUdeviceptr) &peer_ctrl->iam_peer[j].done);
             }
         }
     }

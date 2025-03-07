@@ -44,7 +44,7 @@ public:
     virtual ucc_status_t init_args(size_t count,
                                    ucc_pt_test_args_t &args) = 0;
     virtual void free_args(ucc_pt_test_args_t &args) = 0;
-    virtual float get_bw(float time_ms, int grsize, ucc_pt_test_args_t args)
+    virtual float get_bw(float time_us, int grsize, ucc_pt_test_args_t args)
     {
         return 0.0;
     }
@@ -224,6 +224,21 @@ public:
     ucc_status_t init_args(size_t count, ucc_pt_test_args_t &args) override;
     void free_args(ucc_pt_test_args_t &args) override;
     float get_bw(float time_ms, int grsize, ucc_pt_test_args_t args) override;
+};
+
+class ucc_pt_coll_ring: public ucc_pt_coll {
+    ucc_mc_buffer_header_t *send_header;
+    ucc_mc_buffer_header_t *recv_header;
+public:
+    ucc_pt_coll_ring(ucc_datatype_t dt, ucc_memory_type mt, int root_shift,
+                     bool is_persistent, ucc_pt_comm *communicator);
+    ucc_status_t init_args(size_t count, ucc_pt_test_args_t &args) override;
+    void free_args(ucc_pt_test_args_t &args) override;
+
+    ucc_status_t alloc_buffers(size_t count, ucc_coll_args_t (&args)[2]);
+    void free_buffers();
+
+    float get_bw(float time_us, int grsize, ucc_pt_test_args_t args) override;
 };
 
 #endif

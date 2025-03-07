@@ -31,8 +31,8 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
 {
     ucc_tl_cuda_team_t *team   = TASK_TEAM(task);
     // TODO: we can't take sync here because it uses task->coll_id to navigate in shared mem 
+    ucc_assert(task->coll_id == 0);
     ucc_tl_cuda_sync_t *sync   = TASK_SYNC(task, UCC_TL_TEAM_RANK(team));
-    // ucc_debug("task coll id: %d", task->coll_id);
     ucc_assert(sync != NULL);
     ucc_rank_t          trank  = UCC_TL_TEAM_RANK(team);
     ucc_rank_t          tsize  = UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))
@@ -216,8 +216,6 @@ static ucc_status_t ucc_bcast_ce_triggered_post(ucc_ee_h ee, ucc_ev_t *ev, ucc_c
 
     coll_task->ee = ee;
 
-
-
     ucc_status_t status = ucc_bcast_ce_post_with_stream((cudaStream_t) ee->ee_context, coll_task);
     if (ucc_likely(status == UCC_OK)) {
         post_event.ev_type         = UCC_EVENT_COLLECTIVE_POST;
@@ -240,9 +238,7 @@ ucc_status_t ucc_tl_cuda_bcast_ce_init(ucc_base_coll_args_t *coll_args,
     ucc_tl_cuda_task_t *task;
     ucc_status_t        status;
 
-    ucc_print("bcast ce init");
-
-
+    ucc_debug("bcast ce init");
 
     if (!ucc_tl_cuda_team_topo_is_fully_connected(team->topo) ||
         UCC_TL_TEAM_SIZE(team) - 1 > UCC_EE_EXECUTOR_MULTI_OP_NUM_BUFS) {

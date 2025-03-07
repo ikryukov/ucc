@@ -7,10 +7,6 @@
 #ifndef UCC_PT_CONFIG_H
 #define UCC_PT_CONFIG_H
 
-#include <iostream>
-#include <sstream>
-#include <string>
-#include <map>
 #include <getopt.h>
 #include <ucc/api/ucc.h>
 #include "utils/ucc_log.h"
@@ -50,6 +46,7 @@ typedef enum {
     UCC_PT_OP_TYPE_MEMCPY          = UCC_COLL_TYPE_LAST + 1,
     UCC_PT_OP_TYPE_REDUCEDT,
     UCC_PT_OP_TYPE_REDUCEDT_STRIDED,
+    UCC_PT_OP_TYPE_RING,
     UCC_PT_OP_TYPE_LAST
 } ucc_pt_op_type_t;
 
@@ -65,6 +62,8 @@ static inline const char* ucc_pt_op_type_str(ucc_pt_op_type_t op)
         return "Reduce DT";
     case UCC_PT_OP_TYPE_REDUCEDT_STRIDED:
         return "Reduce DT strided";
+    case UCC_PT_OP_TYPE_RING:
+        return "Ring using Bcast with active set";
     default:
         break;
     }

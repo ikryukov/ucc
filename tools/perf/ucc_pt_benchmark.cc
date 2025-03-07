@@ -84,6 +84,10 @@ ucc_pt_benchmark::ucc_pt_benchmark(ucc_pt_benchmark_config cfg,
         coll = new ucc_pt_op_reduce_strided(cfg.dt, cfg.mt, cfg.op, cfg.n_bufs,
                                             comm);
         break;
+    case UCC_PT_OP_TYPE_RING:
+        coll = new ucc_pt_coll_ring(cfg.dt, cfg.mt, cfg.root_shift,
+                                    cfg.persistent, comm);
+        break;
     default:
         throw std::runtime_error("not supported collective");
     }
@@ -94,7 +98,7 @@ ucc_status_t ucc_pt_benchmark::run_bench() noexcept
     size_t min_count = coll->has_range() ? config.min_count : 1;
     size_t max_count = coll->has_range() ? config.max_count : 1;
     ucc_status_t       st;
-    ucc_pt_test_args_t args;
+    ucc_pt_test_args_t args[2]; // for ring we need to send to next and receive from prev - two collectives per rank
     double             time;
 
     print_header();
@@ -106,18 +110,47 @@ ucc_status_t ucc_pt_benchmark::run_bench() noexcept
             iter = config.n_iter_large;
             warmup = config.n_warmup_large;
         }
-        args.coll_args.root = config.root;
-        UCCCHECK_GOTO(coll->init_args(cnt, args), exit_err, st);
+        args[0].coll_args.root = config.root;
+        UCCCHECK_GOTO(coll->init_args(cnt, args[0]), exit_err, st);
         if ((uint64_t)config.op_type < (uint64_t)UCC_COLL_TYPE_LAST) {
-            UCCCHECK_GOTO(run_single_coll_test(args.coll_args, warmup, iter, time),
+            UCCCHECK_GOTO(run_single_coll_test(args[0].coll_args, warmup, iter, time),
                           free_coll, st);
+        } else if (config.op_type == UCC_PT_OP_TYPE_RING) {
+            // UCCCHECK_GOTO(coll->init_args(cnt, args[1]), exit_err, st);
+            ucc_coll_args_t ring_args[2] = {};
+            ucc_pt_coll_ring* coll_ring = dynamic_cast<ucc_pt_coll_ring*>(coll);
+            UCCCHECK_GOTO(coll_ring->alloc_buffers(cnt, ring_args), exit_err, st);
+            
+            int rank_to_send = (comm->get_rank() + 1) % comm->get_size();
+            int rank_from_recv = (comm->get_rank() + comm->get_size() - 1) % comm->get_size();
+            // send
+            ring_args[0].mask = UCC_COLL_ARGS_FIELD_ACTIVE_SET | UCC_COLL_ARGS_FIELD_TAG;
+            ring_args[0].coll_type = UCC_COLL_TYPE_BCAST;
+            ring_args[0].root = comm->get_rank();
+            ring_args[0].active_set.size = 2;
+            ring_args[0].active_set.start = comm->get_rank();
+            ring_args[0].active_set.stride = rank_to_send - comm->get_rank(); // send to next rank
+            ring_args[0].tag = (cnt + 1) % 777;
+
+            // recv
+            ring_args[1].mask = UCC_COLL_ARGS_FIELD_ACTIVE_SET | UCC_COLL_ARGS_FIELD_TAG;
+            ring_args[1].coll_type = UCC_COLL_TYPE_BCAST;
+            ring_args[1].root = rank_from_recv;
+            ring_args[1].active_set.size = 2;
+            ring_args[1].active_set.start = comm->get_rank();
+            ring_args[1].active_set.stride = rank_from_recv - comm->get_rank(); // recv from prev rank
+            ring_args[1].tag = (cnt + 1) % 777;
+            
+            UCCCHECK_GOTO(run_paired_coll_test(ring_args, warmup, iter, time), free_coll, st);
+
+            coll_ring->free_buffers();
         } else {
-            UCCCHECK_GOTO(run_single_executor_test(args.executor_args,
+            UCCCHECK_GOTO(run_single_executor_test(args[0].executor_args,
                                                    warmup, iter, time),
                           free_coll, st);
         }
-        print_time(cnt, args, time);
-        coll->free_args(args);
+        print_time(cnt, args[0], time);
+        coll->free_args(args[0]);
         if (max_count == 0) {
             /* exit from loop when min_count == max_count == 0 */
             break;
@@ -126,7 +159,7 @@ ucc_status_t ucc_pt_benchmark::run_bench() noexcept
 
     return UCC_OK;
 free_coll:
-    coll->free_args(args);
+    coll->free_args(args[0]);
 exit_err:
     return st;
 }
@@ -222,6 +255,111 @@ ucc_status_t ucc_pt_benchmark::run_single_coll_test(ucc_coll_args_t args,
     return UCC_OK;
 free_req:
     ucc_collective_finalize(req);
+exit_err:
+    return st;
+}
+
+ucc_status_t ucc_pt_benchmark::run_paired_coll_test(ucc_coll_args_t args[2],
+                                                    int nwarmup, int niter,
+                                                    double &time) noexcept
+{
+    const bool     triggered  = config.triggered;
+    const bool     persistent = config.persistent;
+    ucc_team_h     team       = comm->get_team();
+    ucc_context_h  ctx        = comm->get_context();
+    ucc_status_t   st         = UCC_OK;
+    ucc_coll_req_h req[2];
+    ucc_ee_h       ee;
+    ucc_ev_t       comp_ev, *post_ev;
+
+    UCCCHECK_GOTO(comm->barrier(), exit_err, st);
+    time = 0;
+
+    if (triggered) {
+        try {
+            ee = comm->get_ee();
+        } catch (std::exception &e) {
+            std::cerr << e.what() << std::endl;
+            return UCC_ERR_NO_MESSAGE;
+        }
+        /* dummy event, for benchmark purposes no real event required */
+        comp_ev.ev_type         = UCC_EVENT_COMPUTE_COMPLETE;
+        comp_ev.ev_context      = nullptr;
+        comp_ev.ev_context_size = 0;
+    }
+
+    if (persistent) {
+        UCCCHECK_GOTO(ucc_collective_init(&args[0], &req[0], team), exit_err, st);
+        UCCCHECK_GOTO(ucc_collective_init(&args[1], &req[1], team), exit_err, st);
+    }
+
+    // args[0].root = config.root % comm->get_size();
+    // args[1].root = config.root % comm->get_size();
+    for (int i = 0; i < nwarmup + niter; i++) {
+        double s = get_time_us();
+
+        if (!persistent) {
+            UCCCHECK_GOTO(ucc_collective_init(&args[0], &req[0], team), exit_err, st);
+            UCCCHECK_GOTO(ucc_collective_init(&args[1], &req[1], team), exit_err, st);
+        }
+
+        if (triggered) {
+            // TODO: add support for triggered paired collectives
+            comp_ev.req = req[0];
+            UCCCHECK_GOTO(ucc_collective_triggered_post(ee, &comp_ev), free_req,
+                          st);
+            UCCCHECK_GOTO(ucc_ee_get_event(ee, &post_ev), free_req, st);
+            ucc_assert(post_ev->ev_type == UCC_EVENT_COLLECTIVE_POST);
+            UCCCHECK_GOTO(ucc_ee_ack_event(ee, post_ev), free_req, st);
+        } else {
+
+            if (comm->get_rank() % 2 == 0)
+            {
+                UCCCHECK_GOTO(ucc_collective_post(req[0]), free_req, st);
+                UCCCHECK_GOTO(ucc_collective_post(req[1]), free_req, st);
+            }
+            else
+            {
+                UCCCHECK_GOTO(ucc_collective_post(req[1]), free_req, st);
+                UCCCHECK_GOTO(ucc_collective_post(req[0]), free_req, st);
+            }
+        }
+
+        ucc_status_t st_send = ucc_collective_test(req[0]);
+        ucc_status_t st_recv = ucc_collective_test(req[1]);
+        while (st_send > 0 || st_recv > 0) {
+            UCCCHECK_GOTO(ucc_context_progress(ctx), free_req, st);
+            st_send = ucc_collective_test(req[0]);
+            st_recv = ucc_collective_test(req[1]);
+        }
+
+        if (!persistent) {
+            ucc_collective_finalize(req[0]);
+            ucc_collective_finalize(req[1]);
+        }
+        double f = get_time_us();
+        if (st != UCC_OK) {
+            goto exit_err;
+        }
+        if (i >= nwarmup) {
+            time += f - s;
+        }
+        // args.root = (args.root + config.root_shift) % comm->get_size();
+        UCCCHECK_GOTO(comm->barrier(), exit_err, st);
+    }
+
+    if (persistent) {
+        ucc_collective_finalize(req[0]);
+        ucc_collective_finalize(req[1]);
+    }
+
+    if (niter != 0) {
+        time /= niter;
+    }
+    return UCC_OK;
+free_req:
+    ucc_collective_finalize(req[0]);
+    ucc_collective_finalize(req[1]);
 exit_err:
     return st;
 }

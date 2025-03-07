@@ -9,6 +9,11 @@ BEGIN_C_DECLS
 #include "utils/ucc_string.h"
 END_C_DECLS
 
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <map>
+
 ucc_pt_config::ucc_pt_config() {
     bootstrap.bootstrap  = UCC_PT_BOOTSTRAP_MPI;
     bench.op_type        = UCC_PT_OP_TYPE_ALLREDUCE;
@@ -56,6 +61,7 @@ const std::map<std::string, ucc_pt_op_type_t> ucc_pt_op_map = {
     {"memcpy", UCC_PT_OP_TYPE_MEMCPY},
     {"reducedt", UCC_PT_OP_TYPE_REDUCEDT},
     {"reducedt_strided", UCC_PT_OP_TYPE_REDUCEDT_STRIDED},
+    {"ring", UCC_PT_OP_TYPE_RING},
 };
 
 const std::map<std::string, ucc_memory_type_t> ucc_pt_memtype_map = {

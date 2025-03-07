@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2021-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # $COPYRIGHT$
 #
 # Additional copyrights may follow
@@ -34,11 +34,12 @@ ucc_perftest_SOURCES =             \
 	ucc_pt_coll_scatterv.cc        \
 	ucc_pt_op_memcpy.cc            \
 	ucc_pt_op_reduce.cc            \
-	ucc_pt_op_reduce_strided.cc
+	ucc_pt_op_reduce_strided.cc	   \
+	ucc_pt_coll_ring.cc
 
 CXX=$(MPICXX)
 LD=$(MPICXX)
 ucc_perftest_CPPFLAGS = $(BASE_CPPFLAGS)
-ucc_perftest_CXXFLAGS = -std=gnu++11 $(BASE_CXXFLAGS)
+ucc_perftest_CXXFLAGS = -std=gnu++17 $(BASE_CXXFLAGS)
 ucc_perftest_LDFLAGS = -Wl,--rpath-link=${UCS_LIBDIR}
 ucc_perftest_LDADD = $(UCC_TOP_BUILDDIR)/src/libucc.la -ldl

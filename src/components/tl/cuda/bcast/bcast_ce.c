@@ -81,15 +81,29 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
 
         stream_semaphore_t* peer_iter_semaphore = &sync->local_semaphores.iam_root[peer].iter_semaphore;
 
-        set_val_remote_semaphore(stream, iter_semaphore, -1); // reset
+        // set_val_remote_semaphore(stream, iter_semaphore, -1); // reset
+
+        CUstreamBatchMemOpParams batch_memops[3] = {};
 
         for (step = 0; step < task->bcast_ce.num_steps; ++step) {
-            // wait for peer enter step
-            wait_semaphore(stream, peer_iter_semaphore, step);
+
+            // wait for peer enter step            
+            // wait_semaphore(stream, peer_iter_semaphore, step);
+
+            // CUstreamBatchMemOpParams batch_memops[2] = {};
+            batch_memops[0].operation = CU_STREAM_MEM_OP_WAIT_VALUE_32;
+            batch_memops[0].waitValue.address = peer_iter_semaphore->dev_sem_val_ptr;
+            batch_memops[0].waitValue.value = step;
 
             if (step == 0) {
-                set_val_remote_semaphore(stream, done_semaphore, 0); // reset done sem
+                // set_val_remote_semaphore(stream, done_semaphore, 0); // reset done sem
+                batch_memops[1].operation = CU_STREAM_MEM_OP_WRITE_VALUE_32;
+                batch_memops[1].writeValue.address = done_semaphore->dev_sem_val_ptr;
+                batch_memops[1].writeValue.value = 0;
             }
+
+            cuStreamBatchMemOp(stream, step == 0 ? 2 : 1, batch_memops, 0);
+
             // copy
             size_t chunk_size = ucc_min(scratch_size, task->bcast_ce.size - step * scratch_size);
             CUDA_CHECK_GOTO(cudaMemcpyAsync(scratch_root,
@@ -103,11 +117,22 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
         }
 
         // wait peer for completion of theirs copy
-        wait_semaphore(stream, peer_iter_semaphore, task->bcast_ce.num_steps);
-
+        // wait_semaphore(stream, peer_iter_semaphore, task->bcast_ce.num_steps);
+        batch_memops[0].operation = CU_STREAM_MEM_OP_WAIT_VALUE_32;
+        batch_memops[0].waitValue.address = peer_iter_semaphore->dev_sem_val_ptr;
+        batch_memops[0].waitValue.value = task->bcast_ce.num_steps;
         // signal last step
-        set_val_remote_semaphore(stream, iter_semaphore, task->bcast_ce.num_steps);
-        set_val_remote_semaphore(stream, done_semaphore, 1); 
+        // set_val_remote_semaphore(stream, iter_semaphore, task->bcast_ce.num_steps);
+        batch_memops[1].operation = CU_STREAM_MEM_OP_WRITE_VALUE_32;
+        batch_memops[1].writeValue.address = iter_semaphore->dev_sem_val_ptr;
+        batch_memops[1].writeValue.value = task->bcast_ce.num_steps;
+        // set_val_remote_semaphore(stream, done_semaphore, 1); 
+        batch_memops[2].operation = CU_STREAM_MEM_OP_WRITE_VALUE_32;
+        batch_memops[2].writeValue.address = done_semaphore->dev_sem_val_ptr;
+        batch_memops[2].writeValue.value = 1;
+
+        cuStreamBatchMemOp(stream, 3, batch_memops, 0);
+
         // for tracking stream execution
         CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
                         exit_err, status);
@@ -120,11 +145,23 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
         stream_semaphore_t* root_iter_semaphore = &sem->iter_semaphore;
         stream_semaphore_t* root_done_semaphore = &sem->done_semaphore;
 
+        CUstreamBatchMemOpParams batch_memops[2] = {};
+
         for (step = 0; step < task->bcast_ce.num_steps; ++step) {
             // 1 notify root that peer is ready to read data
-            set_val_remote_semaphore(stream, iter_semaphore, step);
+            // set_val_remote_semaphore(stream, iter_semaphore, step);
+            batch_memops[0].operation = CU_STREAM_MEM_OP_WRITE_VALUE_32;
+            batch_memops[0].waitValue.address = iter_semaphore->dev_sem_val_ptr;
+            batch_memops[0].waitValue.value = step;
+
             // wait while root places its chunk of data to scratch
-            wait_semaphore(stream, root_iter_semaphore, step);
+            // wait_semaphore(stream, root_iter_semaphore, step);
+            batch_memops[1].operation = CU_STREAM_MEM_OP_WAIT_VALUE_32;
+            batch_memops[1].writeValue.address = root_iter_semaphore->dev_sem_val_ptr;
+            batch_memops[1].writeValue.value = step;
+            
+            cuStreamBatchMemOp(stream, 2, batch_memops, 0);
+
             size_t chunk_size = ucc_min(scratch_size, task->bcast_ce.size - step * scratch_size);
             CUDA_CHECK_GOTO(cudaMemcpyAsync(PTR_OFFSET(task->bcast_ce.sbuf,
                                                        step * scratch_size),
@@ -133,9 +170,17 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
                             exit_err, status);
         }
         // place event to signal completion
-        set_val_remote_semaphore(stream, iter_semaphore, task->bcast_ce.num_steps);
+        // set_val_remote_semaphore(stream, iter_semaphore, task->bcast_ce.num_steps);
+        batch_memops[0].operation = CU_STREAM_MEM_OP_WRITE_VALUE_32;
+        batch_memops[0].waitValue.address = iter_semaphore->dev_sem_val_ptr;
+        batch_memops[0].waitValue.value = task->bcast_ce.num_steps;
         // wait root done sem
-        wait_semaphore(stream, root_done_semaphore, 1);
+        // wait_semaphore(stream, root_done_semaphore, 1);
+        batch_memops[1].operation = CU_STREAM_MEM_OP_WAIT_VALUE_32;
+        batch_memops[1].writeValue.address = root_done_semaphore->dev_sem_val_ptr;
+        batch_memops[1].writeValue.value = 1;
+
+        cuStreamBatchMemOp(stream, 2, batch_memops, 0);
         // for tracking stream execution
         CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
                         exit_err, status);

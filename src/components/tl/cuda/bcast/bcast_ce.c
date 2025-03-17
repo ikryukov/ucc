@@ -160,8 +160,9 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
             // wait while root places its chunk of data to scratch
             // wait_semaphore(stream, root_iter_semaphore, step);
             batch_memops[1].operation = CU_STREAM_MEM_OP_WAIT_VALUE_32;
-            batch_memops[1].writeValue.address = root_iter_semaphore->dev_sem_val_ptr;
-            batch_memops[1].writeValue.value = step;
+            batch_memops[1].waitValue.address = root_iter_semaphore->dev_sem_val_ptr;
+            batch_memops[1].waitValue.value = step;
+            batch_memops[1].waitValue.flags = CU_STREAM_WAIT_VALUE_EQ;
             
             cuStreamBatchMemOp(stream, 2, batch_memops, 0);
 

@@ -153,9 +153,9 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
             // 1 notify root that peer is ready to read data
             // set_val_remote_semaphore(stream, iter_semaphore, step);
             batch_memops[0].operation = CU_STREAM_MEM_OP_WRITE_VALUE_32;
-            batch_memops[0].waitValue.address = iter_semaphore->dev_sem_val_ptr;
-            batch_memops[0].waitValue.value = step;
-            batch_memops[0].waitValue.flags = CU_STREAM_WAIT_VALUE_EQ;
+            batch_memops[0].writeValue.address = iter_semaphore->dev_sem_val_ptr;
+            batch_memops[0].writeValue.value = step;
+            batch_memops[0].writeValue.flags = CU_STREAM_WAIT_VALUE_EQ;
 
             // wait while root places its chunk of data to scratch
             // wait_semaphore(stream, root_iter_semaphore, step);
@@ -175,14 +175,15 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
         // place event to signal completion
         // set_val_remote_semaphore(stream, iter_semaphore, task->bcast_ce.num_steps);
         batch_memops[0].operation = CU_STREAM_MEM_OP_WRITE_VALUE_32;
-        batch_memops[0].waitValue.address = iter_semaphore->dev_sem_val_ptr;
-        batch_memops[0].waitValue.value = task->bcast_ce.num_steps;
-        batch_memops[0].waitValue.flags = CU_STREAM_WAIT_VALUE_EQ;
+        batch_memops[0].writeValue.address = iter_semaphore->dev_sem_val_ptr;
+        batch_memops[0].writeValue.value = task->bcast_ce.num_steps;
+        batch_memops[0].writeValue.flags = CU_STREAM_WAIT_VALUE_EQ;
         // wait root done sem
         // wait_semaphore(stream, root_done_semaphore, 1);
         batch_memops[1].operation = CU_STREAM_MEM_OP_WAIT_VALUE_32;
-        batch_memops[1].writeValue.address = root_done_semaphore->dev_sem_val_ptr;
-        batch_memops[1].writeValue.value = 1;
+        batch_memops[1].waitValue.address = root_done_semaphore->dev_sem_val_ptr;
+        batch_memops[1].waitValue.value = 1;
+        batch_memops[1].waitValue.flags = CU_STREAM_WAIT_VALUE_EQ;
 
         cuStreamBatchMemOp(stream, 2, batch_memops, 0);
         // for tracking stream execution

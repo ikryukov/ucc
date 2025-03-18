@@ -137,7 +137,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
         batch_memops[2].writeValue.address = done_semaphore->dev_sem_val_ptr;
         batch_memops[2].writeValue.value = 1;
 
-        cuStreamBatchMemOp(stream, 3, batch_memops, 0);
+        CUDADRV_FUNC(cuStreamBatchMemOp(stream, 3, batch_memops, 0));
 
         // for tracking stream execution
         CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
@@ -167,7 +167,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
             batch_memops[1].waitValue.value = step;
             batch_memops[1].waitValue.flags = CU_STREAM_WAIT_VALUE_EQ;
             
-            cuStreamBatchMemOp(stream, 2, batch_memops, 0);
+            CUDADRV_FUNC(cuStreamBatchMemOp(stream, 2, batch_memops, 0));
 
             size_t chunk_size = ucc_min(scratch_size, task->bcast_ce.size - step * scratch_size);
             CUDA_CHECK_GOTO(cudaMemcpyAsync(PTR_OFFSET(task->bcast_ce.sbuf,
@@ -188,7 +188,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
         batch_memops[1].waitValue.value = 1;
         batch_memops[1].waitValue.flags = CU_STREAM_WAIT_VALUE_EQ;
 
-        cuStreamBatchMemOp(stream, 2, batch_memops, 0);
+        CUDADRV_FUNC(cuStreamBatchMemOp(stream, 2, batch_memops, 0));
         // for tracking stream execution
         CUDA_CHECK_GOTO(cudaEventRecord(task->bcast_ce.evtCompletion, stream),
                         exit_err, status);

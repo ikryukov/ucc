@@ -44,6 +44,8 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
     ucc_status_t        status;
     int i, step, peer;
 
+    ucc_assert(tsize != 0);
+
     nvtxEventAttributes_t eventAttrib = {0};
     eventAttrib.version = NVTX_VERSION;
     eventAttrib.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
@@ -60,6 +62,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
     if (trank == task->bcast_ce.root) {
         // root
         // find peer 
+        peer = -1;
         for (i = 0; i < tsize; ++i)
         {
             if (UCC_COLL_ARGS_ACTIVE_SET(&TASK_ARGS(task))) {
@@ -73,6 +76,7 @@ static ucc_status_t prepare_commands(ucc_tl_cuda_task_t *task)
             }
             break;
         }
+        ucc_assert(peer != -1);
         
         ucc_debug("hello from root [%d] peer [%d] / tsize = %d", trank, peer, tsize);
 

@@ -24,7 +24,7 @@ comp_noinst = libucc_tl_cuda_kernels.la
 if TL_CUDA_NVLS_ENABLED
 libucc_tl_cuda_kernels_la_SOURCES  = reduce_scatter_kernel.cu allreduce_kernel.cu
 else
-libucc_tl_cuda_kernels_la_SOURCES  = 
+libucc_tl_cuda_kernels_la_SOURCES  =
 endif
 
 libucc_tl_cuda_kernels_la_CPPFLAGS =

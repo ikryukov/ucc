@@ -50,11 +50,9 @@ allreduce =                    \
 	allreduce/allreduce.h      \
 	allreduce/allreduce.c
 
-if TL_CUDA_NVLS_ENABLED
 reduce_scatter += reduce_scatter/reduce_scatter_nvls.c
 
 allreduce += allreduce/allreduce_nvls.c
-endif
 
 sources =               \
 	tl_cuda.h           \
@@ -75,9 +73,7 @@ sources =               \
 	$(reduce_scatter)   \
 	$(reduce_scatterv)
 
-if TL_CUDA_NVLS_ENABLED
 sources += tl_cuda_nvls.h tl_cuda_nvls.c
-endif
 
 module_LTLIBRARIES = libucc_tl_cuda.la
 libucc_tl_cuda_la_SOURCES  = $(sources)

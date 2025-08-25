@@ -8,9 +8,7 @@
 #include "tl_cuda_coll.h"
 #include "tl_cuda_topo.h"
 #include "tl_cuda_cache.h"
-#ifdef HAVE_NVLS
 #include "tl_cuda_nvls.h"
-#endif
 #include "core/ucc_team.h"
 #include "coll_score/ucc_coll_score.h"
 #include "utils/arch/cpu.h"
@@ -148,10 +146,8 @@ UCC_CLASS_CLEANUP_FUNC(ucc_tl_cuda_team_t)
         ucc_tl_cuda_team_topo_destroy(self->topo);
     }
 
-#ifdef HAVE_NVLS
     // destroy the nvls context
     ucc_tl_cuda_nvls_destroy(self, self->super.super.context);
-#endif
 
     if (self->ids) {
         if (self->sync != (void*)-1) {
@@ -338,13 +334,11 @@ barrier:
     team->oob_req = NULL;
     tl_debug(tl_team->context->lib, "initialized tl team: %p", team);
 
-#ifdef HAVE_NVLS
     status = ucc_tl_cuda_nvls_init(team, tl_team->context);
     if (status != UCC_OK) {
         ucc_error("failed to init nvls multicast");
         goto exit_err;
     }
-#endif
 
     return UCC_OK;
 

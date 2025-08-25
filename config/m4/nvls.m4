@@ -8,8 +8,8 @@ AS_IF([test "x$nvls_checked" != "xyes"],[
     nvls_happy="no"
 
     AC_ARG_WITH([nvls],
-            [AS_HELP_STRING([--with-nvls], [Enable NVLS (NVLINK SHARP) support (default is no).])],
-            [], [with_nvls=no])
+            [AS_HELP_STRING([--with-nvls], [Deprecated: NVLS is always enabled when CUDA >= 12 is available.])],
+            [], [with_nvls=auto])
 
     AS_IF([test "x$with_nvls" != "xno"],
     [
@@ -23,7 +23,6 @@ AS_IF([test "x$nvls_checked" != "xyes"],[
             AS_IF([test $CUDA_MAJOR_VERSION -ge 12],
             [
                 nvls_happy="yes"
-                AC_DEFINE([HAVE_NVLS], [1], [Enable NVLS support])
             ],
             [
                 nvls_happy="no"

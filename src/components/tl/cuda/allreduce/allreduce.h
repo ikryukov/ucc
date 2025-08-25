@@ -11,22 +11,14 @@
 #include "tl_cuda_coll.h"
 
 enum {
-#ifdef HAVE_NVLS
     UCC_TL_CUDA_ALLREDUCE_ALG_NVLS,
-#else
-    UCC_TL_CUDA_ALLREDUCE_ALG_AUTO,
-#endif /* HAVE_NVLS */
     UCC_TL_CUDA_ALLREDUCE_ALG_LAST
 };
 
 extern ucc_base_coll_alg_info_t
     ucc_tl_cuda_allreduce_algs[UCC_TL_CUDA_ALLREDUCE_ALG_LAST + 1];
 
-#ifdef HAVE_NVLS
 #define UCC_TL_CUDA_ALLREDUCE_DEFAULT_ALG_SELECT_STR "allreduce:cuda:@0"
-#else
-#define UCC_TL_CUDA_ALLREDUCE_DEFAULT_ALG_SELECT_STR ""
-#endif /* HAVE_NVLS */
 
 ucc_status_t ucc_tl_cuda_allreduce_init(ucc_base_coll_args_t *coll_args,
                                         ucc_base_team_t      *team,

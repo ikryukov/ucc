@@ -23,7 +23,6 @@ UCC_CLASS_INIT_FUNC(ucc_tl_cuda_lib_t, const ucc_base_lib_params_t *params,
     if (self->cfg.allgather_ring_num_chunks > UCC_TL_CUDA_MAX_RING_CHUNKS) {
         self->cfg.allgather_ring_num_chunks = UCC_TL_CUDA_MAX_RING_CHUNKS;
     }
-#ifdef HAVE_NVLS
     if (self->cfg.nvls_sm_count < 1) {
         tl_error(
             &self->super,
@@ -54,7 +53,6 @@ UCC_CLASS_INIT_FUNC(ucc_tl_cuda_lib_t, const ucc_base_lib_params_t *params,
             UCC_TL_CUDA_MAX_NVLS_THREADS);
         return UCC_ERR_INVALID_PARAM;
     }
-#endif
 
     /* min scratch size should be large enough so that
      * ucc_align_down_pow2(scratch_size / nrings / nchunks / dt_size / 2, 64) > 1

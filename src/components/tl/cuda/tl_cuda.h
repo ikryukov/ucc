@@ -16,9 +16,7 @@
 #include "tl_cuda_ep_hash.h"
 #include "tl_cuda_topo.h"
 #include "tl_cuda_team_topo.h"
-#ifdef HAVE_NVLS
 #include "tl_cuda_nvls.h"
-#endif
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -30,7 +28,6 @@
 #define UCC_TL_CUDA_MAX_PEERS 8
 #define UCC_TL_CUDA_MAX_RING_CHUNKS 8
 
-#ifdef HAVE_NVLS
 #define UCC_TL_CUDA_MAX_NVLS_SM_COUNT 32
 #define UCC_TL_CUDA_MAX_NVLS_THREADS 1024
 
@@ -39,13 +36,6 @@
      UCC_COLL_TYPE_ALLGATHER | UCC_COLL_TYPE_ALLGATHERV |                      \
      UCC_COLL_TYPE_BCAST | UCC_COLL_TYPE_ALLREDUCE |                           \
      UCC_COLL_TYPE_REDUCE_SCATTER | UCC_COLL_TYPE_REDUCE_SCATTERV)
-#else
-#define UCC_TL_CUDA_SUPPORTED_COLLS                                            \
-    (UCC_COLL_TYPE_ALLTOALL | UCC_COLL_TYPE_ALLTOALLV |                        \
-     UCC_COLL_TYPE_ALLGATHER | UCC_COLL_TYPE_ALLGATHERV |                      \
-     UCC_COLL_TYPE_BCAST | UCC_COLL_TYPE_REDUCE_SCATTER |                      \
-     UCC_COLL_TYPE_REDUCE_SCATTERV)
-#endif /* HAVE_NVLS */
 
 #define UCC_TL_CUDA_TEAM_LIB(_team)                                            \
     (ucc_derived_of((_team)->super.super.context->lib, ucc_tl_cuda_lib_t))
@@ -96,11 +86,9 @@ typedef struct ucc_tl_cuda_lib_config {
     uint32_t            allgather_ring_num_chunks;
     unsigned long       reduce_scatter_ring_max_rings;
     int                 topo_cache_enable;
-#ifdef HAVE_NVLS
     size_t              nvls_symmetric_size; // Size of the symmetric memory for NVLS, for each task
     uint32_t            nvls_sm_count;       // Number of blocks (SMs) to use for NVLS algorithms
     uint32_t            nvls_threads;        // Number of threads per block to use for NVLS algorithms
-#endif
 } ucc_tl_cuda_lib_config_t;
 
 typedef struct ucc_tl_cuda_context_config {
@@ -195,9 +183,7 @@ typedef struct ucc_tl_cuda_team {
     int                       *shared_handles;
     ucc_team_oob_coll_t        oob;
     void                      *oob_req;
-#ifdef HAVE_NVLS
     ucc_tl_cuda_nvls_t         nvls;
-#endif
 } ucc_tl_cuda_team_t;
 
 UCC_CLASS_DECLARE(ucc_tl_cuda_team_t, ucc_base_context_t *,
@@ -296,7 +282,6 @@ struct ucc_tl_cuda_task {
             size_t (*get_offset)(const ucc_tl_cuda_task_t *task,
                                  ucc_rank_t                block);
         } reduce_scatterv_linear;
-#ifdef HAVE_NVLS
         struct {
             int                     stage;
             int                     num_frags;
@@ -322,7 +307,6 @@ struct ucc_tl_cuda_task {
             CUdeviceptr   uc_va; // Memory handle for UC symmetric memory
             void          *evtCompletion;
         } allreduce_nvls;
-#endif
     };
 };
 

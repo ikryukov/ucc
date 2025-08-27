@@ -81,7 +81,6 @@ void ucc_tl_cuda_allreduce_nvls_progress(ucc_coll_task_t *coll_task)
                                        task->allreduce_nvls.buf_size_bytes,
                                        TASK_NVLS_CONTROL_MC(task),
                                        TASK_NVLS_CONTROL_UC(task),
-                                       task->allreduce_nvls.coll_id,
                                        trank,
                                        UCC_TL_TEAM_SIZE(team), dt);
         if (status != UCC_OK) {

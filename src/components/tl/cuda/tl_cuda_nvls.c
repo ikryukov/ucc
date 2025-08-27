@@ -396,19 +396,9 @@ ucc_status_t ucc_tl_cuda_nvls_init(struct ucc_tl_cuda_team *self,
 
     if (UCC_TL_TEAM_RANK(self) == 0) {
         // Build a host-side initialized control block and replicate it across slots
-        unsigned char host_control[NVLS_CONTROL_SIZE] = {0};
-        ucc_tl_cuda_nvls_control_t *control = (ucc_tl_cuda_nvls_control_t *)host_control;
-        for (int j = 0; j < UCC_TL_CUDA_NVLS_MAX_BLOCKS_PER_GPU; j++) {
-            ucc_tl_cuda_nvls_barrier_t *barrier = &control->barriers[j];
-
-            barrier->count = 0;
-            barrier->sense = 0;
-        }
-
         size_t stride = lib->cfg.nvls_symmetric_size + NVLS_CONTROL_SIZE;
         void  *control_uc0 = PTR_OFFSET((void *)uc_va, lib->cfg.nvls_symmetric_size);
-        CUDA_CHECK(cudaMemcpy2D(control_uc0, stride, host_control, NVLS_CONTROL_SIZE,
-                                NVLS_CONTROL_SIZE, lib->cfg.max_concurrent, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset2D(control_uc0, stride, 0, NVLS_CONTROL_SIZE, lib->cfg.max_concurrent));
     }
 
     ucc_free(shared_pids);

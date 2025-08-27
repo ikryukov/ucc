@@ -54,7 +54,7 @@ __device__ __forceinline__ void nvls_bar(ucc_tl_cuda_nvls_barrier_t *mc_barrier,
             sense_ref.store(local_sense, cuda::memory_order_release);
             printf("I'm the last one\n");
         } else {
-            printf("waiting for sense\n");
+            printf("waiting for sense, pos: %d\n", pos);
             // wait for other blocks/GPUs to publish the new sense
             while (sense_ref.load(cuda::memory_order_acquire) != local_sense) {
                 __nanosleep(64);

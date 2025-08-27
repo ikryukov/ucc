@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <cuda/atomic>
 
+#include "components/tl/cuda/tl_cuda_nvls.h"
+
 #define MULTIMEM_ST(val, ptr)                                                  \
     asm volatile("multimem.st.global.v4.f32 [%0], {%1,%2,%3,%4};" ::"l"(ptr),  \
                  "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w)                \
@@ -35,23 +37,26 @@
 
 #ifdef __cplusplus
 // NVLS global barrier helper used by kernels to synchronize via multicast/unicast counters
-__device__ __forceinline__ void nvls_bar(uint64_t *mc_arrival_counter,
-                                         uint64_t *uc_arrival_counter,
-                                         uint64_t  expected_count)
+__device__ __forceinline__ void nvls_bar(ucc_tl_cuda_nvls_barrier_t *mc_barrier,
+                                         ucc_tl_cuda_nvls_barrier_t *uc_barrier,
+                                         ucc_rank_t team_size)
 {
     if (threadIdx.x == 0) {
-        // first thread in block increments the multicast arrival counter
-        asm volatile("multimem.red.release.sys.global.add.u64 [%0], %1;" ::"l"(
-                         mc_arrival_counter),
-                     "n"(1)
-                     : "memory");
-        asm volatile("fence.proxy.alias;" ::: "memory");
+        cuda::atomic_ref<int, cuda::thread_scope_system> sense_ref(uc_barrier[blockIdx.x].sense);
+        int local_sense = 1 - sense_ref.load(cuda::memory_order_relaxed);
 
-        // waits others blocks to reach the same phase
-        cuda::atomic_ref<uint64_t, cuda::thread_scope_system> ac(
-            *uc_arrival_counter);
-        // sync per block: block 0 on gpu 0 with block 0 on gpu 1, block 1 on gpu 0 with block 1 on gpu 1, etc.
-        while (expected_count > ac.load(cuda::memory_order_acquire)) {
+        // first thread in block increments the counter
+        cuda::atomic_ref<ucc_rank_t, cuda::thread_scope_system> count_ref(uc_barrier[blockIdx.x].count);
+        ucc_rank_t pos = count_ref.fetch_add(1, cuda::memory_order_relaxed);
+
+        if (pos == team_size - 1) {
+            count_ref.store(0, cuda::memory_order_relaxed);
+            sense_ref.store(local_sense, cuda::memory_order_release);
+        } else {
+            // wait for other blocks/GPUs to publish the new sense
+            while (sense_ref.load(cuda::memory_order_acquire) != local_sense) {
+                __nanosleep(64);
+            }
         }
     }
     // all other threads in block wait for the first thread to finish

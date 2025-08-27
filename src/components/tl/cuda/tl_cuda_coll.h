@@ -45,8 +45,7 @@ extern const char
         (PTR_OFFSET(_scratch, (_task)->coll_id * _scratch_size));              \
     })
 
-#define NVLS_CONTROL_SIZE 1024
-
+#define NVLS_CONTROL_SIZE 1024*32
 #define TASK_SYMMETRIC_MC(_task)                                                   \
     ({                                                                             \
         ucc_tl_cuda_team_t *_team = TASK_TEAM(_task);                              \

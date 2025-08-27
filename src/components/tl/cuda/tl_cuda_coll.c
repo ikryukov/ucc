@@ -98,7 +98,7 @@ ucc_status_t ucc_tl_cuda_coll_init(ucc_base_coll_args_t *coll_args,
 }
 
 ucc_status_t ucc_tl_cuda_shm_barrier_init_root(ucc_rank_t size, ucc_rank_t rank, ucc_rank_t root,
-                                          ucc_tl_cuda_shm_barrier_t *barrier)
+                                               ucc_tl_cuda_shm_barrier_t *barrier)
 {
     if (rank == root) {
         barrier->size  = size;

@@ -191,7 +191,7 @@ static ucc_status_t ucc_tl_cuda_nvls_sync_barrier(struct ucc_tl_cuda_team *self)
 ucc_status_t ucc_tl_cuda_nvls_init(struct ucc_tl_cuda_team *self,
                                    ucc_base_context_t      *tl_context)
 {
-    ucc_tl_cuda_lib_t *lib             = ucc_derived_of(tl_context->lib, ucc_tl_cuda_lib_t);
+    ucc_tl_cuda_lib_t  *lib            = ucc_derived_of(tl_context->lib, ucc_tl_cuda_lib_t);
     ucc_tl_cuda_nvls_t *nvls           = &self->nvls;
     const size_t        symmetric_size = lib->cfg.max_concurrent * (lib->cfg.nvls_symmetric_size + NVLS_CONTROL_SIZE);
     size_t              minGran = 0, gran = 0, mcSize = 0;
@@ -205,6 +205,7 @@ ucc_status_t ucc_tl_cuda_nvls_init(struct ucc_tl_cuda_team *self,
     CUmemAllocationHandleType handleType = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
     CUmulticastObjectProp        mcProp  = {};
 
+    static_assert(sizeof(ucc_tl_cuda_nvls_control_t) <= NVLS_CONTROL_SIZE, "ucc_tl_cuda_nvls_control_t is too large");
 
     // Initialize multicast properties
     mcProp.numDevices  = UCC_TL_TEAM_SIZE(self);
@@ -394,12 +395,20 @@ ucc_status_t ucc_tl_cuda_nvls_init(struct ucc_tl_cuda_team *self,
     memset(nvls->coll_ids, 0, lib->cfg.max_concurrent * sizeof(size_t));
 
     if (UCC_TL_TEAM_RANK(self) == 0) {
-        // root rank zero-initializes the control region for each task slot
+        // Build a host-side initialized control block and replicate it across slots
+        unsigned char host_control[NVLS_CONTROL_SIZE] = {0};
+        ucc_tl_cuda_nvls_control_t *control = (ucc_tl_cuda_nvls_control_t *)host_control;
+        for (int j = 0; j < UCC_TL_CUDA_NVLS_MAX_BLOCKS_PER_GPU; j++) {
+            ucc_tl_cuda_nvls_barrier_t *barrier = &control->barriers[j];
+
+            barrier->count = 0;
+            barrier->sense = 0;
+        }
+
         size_t stride = lib->cfg.nvls_symmetric_size + NVLS_CONTROL_SIZE;
-        void  *control_uc0 =
-            PTR_OFFSET((void *)uc_va, lib->cfg.nvls_symmetric_size);
-        CUDA_CHECK(cudaMemset2D(control_uc0, stride, 0, NVLS_CONTROL_SIZE,
-                                lib->cfg.max_concurrent));
+        void  *control_uc0 = PTR_OFFSET((void *)uc_va, lib->cfg.nvls_symmetric_size);
+        CUDA_CHECK(cudaMemcpy2D(control_uc0, stride, host_control, NVLS_CONTROL_SIZE,
+                                NVLS_CONTROL_SIZE, lib->cfg.max_concurrent, cudaMemcpyHostToDevice));
     }
 
     ucc_free(shared_pids);

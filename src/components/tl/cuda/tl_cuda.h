@@ -100,6 +100,7 @@ typedef struct ucc_tl_cuda_lib_config {
     size_t              nvls_symmetric_size; // Size of the symmetric memory for NVLS, for each task
     uint32_t            nvls_sm_count;       // Number of blocks (SMs) to use for NVLS algorithms
     uint32_t            nvls_threads;        // Number of threads per block to use for NVLS algorithms
+    int                 nvls_dedicated_barriers; // Use dedicated barrier kernels (1) or inline barriers (0)
 #endif
 } ucc_tl_cuda_lib_config_t;
 

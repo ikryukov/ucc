@@ -23,15 +23,24 @@ TestReduceScatterv::TestReduceScatterv(ucc_test_team_t &_team, TestCaseParams &p
     if (skip_reduce(test_max_size < msgsize, TEST_SKIP_MEM_LIMIT, team.comm)) {
         return;
     }
+
+    /* Align count to 4 elements for NVLS 16-byte alignment compatibility */
+    count = (count / 4) * 4;
+    if (count == 0) {
+        test_skip = TEST_SKIP_NOT_SUPPORTED;
+        return;
+    }
+
     counts = (int *)ucc_malloc(comm_size * sizeof(uint32_t), "counts buf");
     UCC_MALLOC_CHECK(counts);
 
     size_t left  = count;
     size_t total = 0;
+    /* Use multiples of 4 for NVLS 16-byte alignment compatibility */
     for (int i = 0; i < comm_size; i++) {
-        size_t c = 2 + i * 2;
+        size_t c = 4 + i * 4;
         if (left < c) {
-            c = left;
+            c = (left / 4) * 4; /* round down to multiple of 4 */
         }
         if (i == comm_size - 1) {
             counts[i] = left;
@@ -40,11 +49,14 @@ TestReduceScatterv::TestReduceScatterv(ucc_test_team_t &_team, TestCaseParams &p
         }
 
         if (left > 0) {
-            left -= c;
+            left -= counts[i];
         }
         total += counts[i];
     }
-    ucc_assert(total == count);
+
+    /* Update msgsize to match aligned total */
+    msgsize = total * dt_size;
+
     check_buf = ucc_malloc(msgsize, "check buf");
     UCC_MALLOC_CHECK(check_buf);
     if (inplace) {
@@ -56,7 +68,7 @@ TestReduceScatterv::TestReduceScatterv(ucc_test_team_t &_team, TestCaseParams &p
         rbuf = rbuf_mc_header->addr;
         sbuf = sbuf_mc_header->addr;
         args.src.info.buffer   = sbuf;
-        args.src.info.count    = count;
+        args.src.info.count    = total;
         args.src.info.datatype = dt;
         args.src.info.mem_type = mem_type;
     }

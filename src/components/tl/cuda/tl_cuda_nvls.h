@@ -70,7 +70,8 @@ typedef struct ucc_tl_cuda_nvls {
 } ucc_tl_cuda_nvls_t;
 
 typedef struct ucc_tl_cuda_nvls_control {
-    uint64_t arrival_counter;
+    uint32_t base;
+    uint32_t counter;
 } ucc_tl_cuda_nvls_control_t;
 
 ucc_status_t ucc_tl_cuda_nvls_check_support(

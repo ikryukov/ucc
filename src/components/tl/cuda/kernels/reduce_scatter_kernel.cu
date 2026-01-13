@@ -16,18 +16,20 @@ extern "C" {
 
 #include "nvls.cuh"
 
+namespace cg = cooperative_groups;
+
 template <typename NvlsOps>
 __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     reduce_scatter_kernel_vec32(
         ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
         const uint32_t total_blocks, uint64_t launch_counter,
-        uint32_t *base_u32, size_t offset, size_t count, uint32_t *dst_u32)
+        uint32_t *base_u32, size_t offset, size_t count, uint32_t *dst_u32,
+        uint32_t tsize)
 {
+    cg::thread_block          tb = cg::this_thread_block();
     // pre barrier
-    nvls_bar(
-        &(mc_bar->arrival_counter),
-        &(uc_bar->arrival_counter),
-        total_blocks * (launch_counter * 2 + 1));
+    NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
+    nvls_barrier.sync(cuda::memory_order_relaxed);
 
     size_t thread_offset = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
     size_t stride        = blockDim.x * gridDim.x * 4;
@@ -41,10 +43,7 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     }
 
     // post barrier
-    nvls_bar(
-        &(mc_bar->arrival_counter),
-        &(uc_bar->arrival_counter),
-        total_blocks * (launch_counter * 2 + 2));
+    nvls_barrier.sync(cuda::memory_order_release);
 }
 
 #ifdef __cplusplus
@@ -87,7 +86,8 @@ ucc_status_t post_reduce_scatter_kernel(
                 base_u32,
                 offset,
                 count,
-                reinterpret_cast<uint32_t *>(dst_ptr));
+                reinterpret_cast<uint32_t *>(dst_ptr),
+                tsize);
         break;
     case UCC_DT_BFLOAT16:
         reduce_scatter_kernel_vec32<NvlsBf16Ops>
@@ -99,7 +99,8 @@ ucc_status_t post_reduce_scatter_kernel(
                 base_u32,
                 offset,
                 count,
-                reinterpret_cast<uint32_t *>(dst_ptr));
+                reinterpret_cast<uint32_t *>(dst_ptr),
+                tsize);
         break;
     default:
         return UCC_ERR_NOT_SUPPORTED;

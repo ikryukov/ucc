@@ -16,19 +16,19 @@ extern "C" {
 
 #include "nvls.cuh"
 
+namespace cg = cooperative_groups;
+
 __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     allgatherv_kernel_vec32(
         ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
         /* block count per gpu * num gpus in Multicast group */
-        const uint32_t total_blocks,
-        uint64_t launch_counter, uint32_t *src_u32, uint32_t *base_u32,
-        size_t my_offset, size_t my_count)
+        const uint32_t total_blocks, uint64_t launch_counter, uint32_t *src_u32,
+        uint32_t *base_u32, size_t my_offset, size_t my_count, uint32_t tsize)
 {
-    // Pre-barrier: ensure all ranks are ready before writing
-    nvls_bar(
-        &(mc_bar->arrival_counter),
-        &(uc_bar->arrival_counter),
-        total_blocks * (launch_counter * 2 + 1));
+    cg::thread_block          tb = cg::this_thread_block();
+    // pre barrier
+    NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
+    nvls_barrier.sync(cuda::memory_order_relaxed);
 
     // Each rank copies its data to NVLS mc buffer at its specific offset using multimem store
     // Datatype agnostic - just copy raw data as uint4 vectors (16 bytes at a time)
@@ -43,11 +43,8 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         MULTIMEM_ST_U32(val, dst);
     }
 
-    // Post-barrier: ensure all ranks have completed writing before reading
-    nvls_bar(
-        &(mc_bar->arrival_counter),
-        &(uc_bar->arrival_counter),
-        total_blocks * (launch_counter * 2 + 2));
+    // post barrier
+    nvls_barrier.sync(cuda::memory_order_release);
 }
 
 #ifdef __cplusplus
@@ -89,7 +86,8 @@ ucc_status_t post_allgatherv_kernel(
         src_u32,
         base_u32,
         my_offset,
-        my_count);
+        my_count,
+        tsize);
 
     CUDA_CHECK(cudaGetLastError());
 

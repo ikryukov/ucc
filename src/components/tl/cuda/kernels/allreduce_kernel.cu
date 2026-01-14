@@ -20,6 +20,10 @@ extern "C" {
 namespace cg = cooperative_groups;
 
 // vectorized allreduce kernel for 32-bit lanes
+// Uses two-level hierarchical barrier:
+//   1. grid.sync() - all blocks on this GPU sync
+//   2. Block 0 does NVLS cross-GPU barrier
+//   3. grid.sync() - release all blocks
 template <typename NvlsOps>
 __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     allreduce_kernel_vec32(
@@ -27,15 +31,24 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         const uint32_t total_blocks, uint64_t launch_counter,
         uint32_t *base_u32, size_t count_u32, uint32_t rank, uint32_t tsize)
 {
-    cg::thread_block          tb = cg::this_thread_block();
-    // pre barrier
-    NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
-    nvls_barrier.sync(cuda::memory_order_relaxed);
+    cg::thread_block tb   = cg::this_thread_block();
+    cg::grid_group   grid = cg::this_grid();
 
-    // Kernel execution
-    size_t chunk_start = ((int64_t)count_u32 * (int64_t)rank) / (int64_t)tsize;
-    size_t chunk_end   = ((int64_t)count_u32 * (int64_t)(rank + 1)) /
-                       (int64_t)tsize;
+    // Only block 0 participates in cross-GPU barrier (tsize arrivals expected)
+    NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
+
+    // === PRE-BARRIER (hierarchical) ===
+    // Block 0 does cross-GPU NVLS barrier
+    if (blockIdx.x == 0) {
+        nvls_barrier.sync(cuda::memory_order_relaxed);
+    }
+    // Release all blocks on this GPU
+    grid.sync();
+
+    // === KERNEL EXECUTION ===
+    size_t chunk_start   = ((int64_t)count_u32 * (int64_t)rank) / (int64_t)tsize;
+    size_t chunk_end     = ((int64_t)count_u32 * (int64_t)(rank + 1)) /
+                           (int64_t)tsize;
     size_t thread_offset = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
     size_t stride        = blockDim.x * gridDim.x * 4;
 
@@ -46,8 +59,15 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         NvlsOps::st(val, base_u32 + idx);
     }
 
-    // post barrier
-    nvls_barrier.sync(cuda::memory_order_release);
+    // === POST-BARRIER (hierarchical) ===
+    // Phase 1: All blocks on this GPU sync
+    grid.sync();
+    // Phase 2: Block 0 does cross-GPU NVLS barrier
+    if (blockIdx.x == 0) {
+        nvls_barrier.sync(cuda::memory_order_release);
+    }
+    // Phase 3: Release all blocks on this GPU
+    grid.sync();
 }
 
 #ifdef __cplusplus
@@ -75,35 +95,30 @@ ucc_status_t post_allreduce_kernel(
         sm_count *
         tsize; // total num of blocks in the multicast group, num gpus * num blocks per gpu, used for barrier synchronization
 
+    void *kernel_args[] = {&mc_bar,         &uc_bar,    &expected_blocks,
+                           &launch_counter, &base_u32,  &count_u32,
+                           &rank,           &tsize};
+    cudaError_t cuda_st;
+
     switch (datatype) {
     case UCC_DT_FLOAT32:
         assert(((uintptr_t)(mc_base_addr) % 8) == 0);
-        allreduce_kernel_vec32<NvlsFp32Ops><<<sm_count, threads, 0, stream>>>(
-            mc_bar,
-            uc_bar,
-            expected_blocks,
-            launch_counter,
-            base_u32,
-            count_u32,
-            rank,
-            tsize);
+        cuda_st = cudaLaunchCooperativeKernel(
+            (void *)allreduce_kernel_vec32<NvlsFp32Ops>, dim3(sm_count),
+            dim3(threads), kernel_args, 0, stream);
         break;
     case UCC_DT_BFLOAT16:
         assert(((uintptr_t)(mc_base_addr) % 8) == 0);
-        allreduce_kernel_vec32<NvlsBf16Ops><<<sm_count, threads, 0, stream>>>(
-            mc_bar,
-            uc_bar,
-            expected_blocks,
-            launch_counter,
-            base_u32,
-            count_u32,
-            rank,
-            tsize);
+        cuda_st = cudaLaunchCooperativeKernel(
+            (void *)allreduce_kernel_vec32<NvlsBf16Ops>, dim3(sm_count),
+            dim3(threads), kernel_args, 0, stream);
         break;
     default:
         return UCC_ERR_NOT_SUPPORTED;
     }
-    CUDA_CHECK(cudaGetLastError());
+    if (cuda_st != cudaSuccess) {
+        return cuda_error_to_ucc_status(cuda_st);
+    }
 
     return UCC_OK;
 }

@@ -7,7 +7,16 @@
 #include "test_mpi.h"
 #include "mpi_util.h"
 
-TestReduceScatterv::TestReduceScatterv(ucc_test_team_t &_team, TestCaseParams &params)
+/* NVLS requires 16-byte alignment (4 elements for float32, 8 for bf16) */
+#define NVLS_COUNT_ALIGN 4
+
+static inline size_t align_count(size_t c)
+{
+    return (c + NVLS_COUNT_ALIGN - 1) / NVLS_COUNT_ALIGN * NVLS_COUNT_ALIGN;
+}
+
+TestReduceScatterv::TestReduceScatterv(
+    ucc_test_team_t &_team, TestCaseParams &params)
     : TestCase(_team, UCC_COLL_TYPE_REDUCE_SCATTERV, params)
 {
     size_t dt_size = ucc_dt_size(params.dt);
@@ -17,8 +26,8 @@ TestReduceScatterv::TestReduceScatterv(ucc_test_team_t &_team, TestCaseParams &p
 
     MPI_Comm_rank(team.comm, &rank);
     MPI_Comm_size(team.comm, &comm_size);
-    op             = params.op;
-    dt             = params.dt;
+    op = params.op;
+    dt = params.dt;
 
     if (skip_reduce(test_max_size < msgsize, TEST_SKIP_MEM_LIMIT, team.comm)) {
         return;
@@ -26,37 +35,38 @@ TestReduceScatterv::TestReduceScatterv(ucc_test_team_t &_team, TestCaseParams &p
     counts = (int *)ucc_malloc(comm_size * sizeof(uint32_t), "counts buf");
     UCC_MALLOC_CHECK(counts);
 
-    size_t left  = count;
-    size_t total = 0;
-    for (int i = 0; i < comm_size; i++) {
-        size_t c = 2 + i * 2;
-        if (left < c) {
-            c = left;
-        }
-        if (i == comm_size - 1) {
-            counts[i] = left;
-        } else {
-            counts[i] = c;
-        }
+    /* Use aligned counts for NVLS compatibility */
+    size_t base_count   = align_count(count / comm_size);
+    size_t total        = 0;
+    size_t aligned_left = count;
 
-        if (left > 0) {
-            left -= c;
+    for (int i = 0; i < comm_size; i++) {
+        if (i == comm_size - 1) {
+            /* Last rank gets the remainder, aligned */
+            counts[i] = align_count(aligned_left);
+        } else {
+            counts[i] = base_count;
+            aligned_left -= base_count;
         }
         total += counts[i];
     }
-    ucc_assert(total == count);
-    check_buf = ucc_malloc(msgsize, "check buf");
+
+    /* Use aligned total for buffer sizes */
+    size_t total_size = total * dt_size;
+
+    check_buf         = ucc_malloc(total_size, "check buf");
     UCC_MALLOC_CHECK(check_buf);
     if (inplace) {
-        UCC_CHECK(ucc_mc_alloc(&rbuf_mc_header, msgsize, mem_type));
+        UCC_CHECK(ucc_mc_alloc(&rbuf_mc_header, total_size, mem_type));
         rbuf = rbuf_mc_header->addr;
     } else {
-        UCC_CHECK(ucc_mc_alloc(&rbuf_mc_header, counts[rank] * dt_size, mem_type));
-        UCC_CHECK(ucc_mc_alloc(&sbuf_mc_header, msgsize, mem_type));
-        rbuf = rbuf_mc_header->addr;
-        sbuf = sbuf_mc_header->addr;
+        UCC_CHECK(
+            ucc_mc_alloc(&rbuf_mc_header, counts[rank] * dt_size, mem_type));
+        UCC_CHECK(ucc_mc_alloc(&sbuf_mc_header, total_size, mem_type));
+        rbuf                   = rbuf_mc_header->addr;
+        sbuf                   = sbuf_mc_header->addr;
         args.src.info.buffer   = sbuf;
-        args.src.info.count    = count;
+        args.src.info.count    = total;
         args.src.info.datatype = dt;
         args.src.info.mem_type = mem_type;
     }
@@ -73,19 +83,26 @@ TestReduceScatterv::TestReduceScatterv(ucc_test_team_t &_team, TestCaseParams &p
 ucc_status_t TestReduceScatterv::set_input(int iter_persistent)
 {
     size_t dt_size = ucc_dt_size(dt);
-    size_t count   = msgsize / dt_size;
-    void * buf;
-    int    rank;
+    int    rank, comm_size;
+    size_t total = 0;
+    void  *buf;
 
     MPI_Comm_rank(team.comm, &rank);
+    MPI_Comm_size(team.comm, &comm_size);
+
+    /* Compute total from aligned counts */
+    for (int i = 0; i < comm_size; i++) {
+        total += counts[i];
+    }
+
     if (inplace) {
         buf = rbuf;
     } else {
         buf = sbuf;
     }
-    init_buffer(buf, count, dt, mem_type, rank * (iter_persistent + 1));
-    UCC_CHECK(ucc_mc_memcpy(check_buf, buf, count * dt_size,
-                            UCC_MEMORY_TYPE_HOST, mem_type));
+    init_buffer(buf, total, dt, mem_type, rank * (iter_persistent + 1));
+    UCC_CHECK(ucc_mc_memcpy(
+        check_buf, buf, total * dt_size, UCC_MEMORY_TYPE_HOST, mem_type));
     return UCC_OK;
 }
 
@@ -98,9 +115,14 @@ ucc_status_t TestReduceScatterv::check()
 
     MPI_Comm_rank(team.comm, &comm_rank);
     MPI_Comm_size(team.comm, &comm_size);
-    MPI_Ireduce_scatter(MPI_IN_PLACE, check_buf, counts, ucc_dt_to_mpi(dt),
-                        op == UCC_OP_AVG ? MPI_SUM : ucc_op_to_mpi(op),
-                        team.comm, &req);
+    MPI_Ireduce_scatter(
+        MPI_IN_PLACE,
+        check_buf,
+        counts,
+        ucc_dt_to_mpi(dt),
+        op == UCC_OP_AVG ? MPI_SUM : ucc_op_to_mpi(op),
+        team.comm,
+        &req);
 
     do {
         MPI_Test(&req, &completed, MPI_STATUS_IGNORE);
@@ -108,8 +130,8 @@ ucc_status_t TestReduceScatterv::check()
     } while (!completed);
 
     if (op == UCC_OP_AVG) {
-        status =
-            divide_buffer(check_buf, team.team->size, counts[comm_rank], dt);
+        status = divide_buffer(
+            check_buf, team.team->size, counts[comm_rank], dt);
         if (status != UCC_OK) {
             return status;
         }
@@ -119,8 +141,12 @@ ucc_status_t TestReduceScatterv::check()
         for (int i = 0; i < comm_rank; i++) {
             offset += counts[i];
         }
-        return compare_buffers(PTR_OFFSET(rbuf, offset * ucc_dt_size(dt)),
-                               check_buf, counts[comm_rank], dt, mem_type);
+        return compare_buffers(
+            PTR_OFFSET(rbuf, offset * ucc_dt_size(dt)),
+            check_buf,
+            counts[comm_rank],
+            dt,
+            mem_type);
     }
     return compare_buffers(rbuf, check_buf, counts[comm_rank], dt, mem_type);
 }

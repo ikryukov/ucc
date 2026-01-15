@@ -62,7 +62,6 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     if (blockIdx.x == 0) {
         nvls_barrier.sync(cuda::memory_order_release);
     }
-    grid.sync();
 }
 
 template <typename NvlsOps>

@@ -21,30 +21,39 @@ namespace cg = cooperative_groups;
 __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     allgatherv_kernel_vec32(
         ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
-        /* block count per gpu * num gpus in Multicast group */
-        const uint32_t total_blocks, uint64_t launch_counter, uint32_t *src_u32,
-        uint32_t *base_u32, size_t my_offset, size_t my_count, uint32_t tsize)
+        uint32_t *src_u32, uint32_t *base_u32, size_t my_offset,
+        size_t my_count, uint32_t tsize)
 {
-    cg::thread_block          tb = cg::this_thread_block();
-    // pre barrier
-    NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
-    nvls_barrier.sync(cuda::memory_order_relaxed);
+    cg::thread_block          tb        = cg::this_thread_block();
+    cg::grid_group            grid      = cg::this_grid();
+    bool                      is_leader = (blockIdx.x == 0);
 
-    // Each rank copies its data to NVLS mc buffer at its specific offset using multimem store
-    // Datatype agnostic - just copy raw data as uint4 vectors (16 bytes at a time)
-    size_t thread_offset = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    size_t stride        = blockDim.x * gridDim.x * 4;
+    // Only leader block participates in cross-GPU barrier
+    NvlsBar<cg::thread_block> nvls_barrier(
+        tb, tsize, mc_bar, uc_bar, is_leader);
 
-    for (size_t idx = thread_offset; idx < my_count; idx += stride) {
-        // Read 4 uint32_t values (16 bytes) from source
-        uint4     val = reinterpret_cast<uint4 *>(src_u32)[idx / 4];
-        // Write to destination at my_offset using multimem store (datatype agnostic)
-        uint32_t *dst = base_u32 + my_offset + idx;
-        MULTIMEM_ST_U32(val, dst);
+    // PRE-BARRIER (hierarchical)
+    if (is_leader) {
+        nvls_barrier.sync(cuda::memory_order_relaxed);
+    }
+    grid.sync();
+
+    // KERNEL EXECUTION
+    // Each rank copies its data to NVLS mc buffer using multimem store
+    uint32_t *dst_ptr = base_u32 + my_offset;
+    size_t    stride  = blockDim.x * gridDim.x * 4;
+    size_t    tid     = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
+
+    for (size_t idx = tid; idx < my_count; idx += stride) {
+        uint4 val = reinterpret_cast<uint4 *>(src_u32 + idx)[0];
+        MULTIMEM_ST_U32(val, dst_ptr + idx);
     }
 
-    // post barrier
-    nvls_barrier.sync(cuda::memory_order_release);
+    // POST-BARRIER (hierarchical)
+    grid.sync();
+    if (is_leader) {
+        nvls_barrier.sync(cuda::memory_order_release);
+    }
 }
 
 #ifdef __cplusplus
@@ -55,8 +64,14 @@ ucc_status_t post_allgatherv_kernel(
     cudaStream_t stream, uint32_t sm_count, uint32_t threads,
     CUdeviceptr src_ptr, CUdeviceptr mc_base_addr, size_t my_offset,
     size_t my_count, CUdeviceptr mc_control_addr, CUdeviceptr uc_control_addr,
-    uint64_t launch_counter, uint32_t tsize)
+    uint32_t tsize)
 {
+    ucc_tl_cuda_nvls_control_t *mc_bar;
+    ucc_tl_cuda_nvls_control_t *uc_bar;
+    uint32_t                   *src_u32;
+    uint32_t                   *base_u32;
+    cudaError_t                 cuda_st;
+
     ucc_assert(sm_count > 0 && sm_count <= UCC_TL_CUDA_MAX_NVLS_SM_COUNT);
     ucc_assert(threads > 0 && threads <= UCC_TL_CUDA_MAX_NVLS_THREADS);
 
@@ -67,29 +82,24 @@ ucc_status_t post_allgatherv_kernel(
     ucc_assert(mc_control_addr % 16 == 0);
     ucc_assert(src_ptr % 16 == 0);
 
-    uint32_t *src_u32  = reinterpret_cast<uint32_t *>(src_ptr);
-    uint32_t *base_u32 = reinterpret_cast<uint32_t *>(mc_base_addr);
-    ucc_tl_cuda_nvls_control_t
-        *mc_bar = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(
-            mc_control_addr);
-    ucc_tl_cuda_nvls_control_t
-        *uc_bar = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(
-            uc_control_addr);
-    /* total num of blocks in the multicast group, used for barrier sync */
-    uint32_t expected_blocks = sm_count * tsize;
+    src_u32  = reinterpret_cast<uint32_t *>(src_ptr);
+    base_u32 = reinterpret_cast<uint32_t *>(mc_base_addr);
+    mc_bar   = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(mc_control_addr);
+    uc_bar   = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(uc_control_addr);
 
-    allgatherv_kernel_vec32<<<sm_count, threads, 0, stream>>>(
-        mc_bar,
-        uc_bar,
-        expected_blocks,
-        launch_counter,
-        src_u32,
-        base_u32,
-        my_offset,
-        my_count,
-        tsize);
+    void *kernel_args[] = {
+        &mc_bar, &uc_bar, &src_u32, &base_u32, &my_offset, &my_count, &tsize};
 
-    CUDA_CHECK(cudaGetLastError());
+    cuda_st = cudaLaunchCooperativeKernel(
+        (void *)allgatherv_kernel_vec32,
+        dim3(sm_count),
+        dim3(threads),
+        kernel_args,
+        0,
+        stream);
+    if (cuda_st != cudaSuccess) {
+        return cuda_error_to_ucc_status(cuda_st);
+    }
 
     return UCC_OK;
 }

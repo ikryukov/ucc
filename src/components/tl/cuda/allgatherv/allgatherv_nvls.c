@@ -67,7 +67,6 @@ ucc_status_t ucc_tl_cuda_allgatherv_nvls_start(ucc_coll_task_t *coll_task)
         task->allgatherv_nvls.count,
         TASK_NVLS_CONTROL_MC(task),
         TASK_NVLS_CONTROL_UC(task),
-        task->allgatherv_nvls.coll_id,
         UCC_TL_TEAM_SIZE(team));
     if (ucc_unlikely(status != UCC_OK)) {
         tl_error(UCC_TASK_LIB(task), "failed to post allgatherv kernel");

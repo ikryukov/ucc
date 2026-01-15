@@ -63,23 +63,35 @@ template <typename Cooperative> struct NvlsBar {
     uint32_t    tsize;
     uint32_t   *mc_counter_ptr;
     uint32_t   *uc_counter_ptr;
+    bool        is_leader;
 
+    // Constructor for multi-block kernels: only leader block updates counter
     __device__  NvlsBar(
          Cooperative coop, uint32_t tsize, void *mc_control_ptr,
-         void *uc_control_ptr)
+         void *uc_control_ptr, bool is_leader)
         : cooperative(coop),
           base(reinterpret_cast<NvlsControlLayout *>(uc_control_ptr)->base),
           tsize(tsize),
           mc_counter_ptr(
               &reinterpret_cast<NvlsControlLayout *>(mc_control_ptr)->counter),
           uc_counter_ptr(
-              &reinterpret_cast<NvlsControlLayout *>(uc_control_ptr)->counter)
+              &reinterpret_cast<NvlsControlLayout *>(uc_control_ptr)->counter),
+          is_leader(is_leader)
+    {
+    }
+
+    // Constructor for single-block kernels (backward compatible)
+    __device__ NvlsBar(
+        Cooperative coop, uint32_t tsize, void *mc_control_ptr,
+        void *uc_control_ptr)
+        : NvlsBar(coop, tsize, mc_control_ptr, uc_control_ptr, true)
     {
     }
 
     __device__ ~NvlsBar()
     {
-        if (cooperative.thread_rank() == 0) {
+        // Only leader block updates the counter to avoid race conditions
+        if (is_leader && cooperative.thread_rank() == 0) {
             *uc_counter_ptr = base;
         }
         cooperative.sync();

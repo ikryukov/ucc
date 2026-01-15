@@ -80,7 +80,6 @@ ucc_status_t ucc_tl_cuda_reduce_scatterv_nvls_start(ucc_coll_task_t *coll_task)
         mc_va,
         TASK_NVLS_CONTROL_MC(task),
         TASK_NVLS_CONTROL_UC(task),
-        task->reduce_scatterv_nvls.coll_id,
         task->reduce_scatterv_nvls.offset,
         task->reduce_scatterv_nvls.count,
         dt,

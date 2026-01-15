@@ -27,69 +27,65 @@ template <typename NvlsOps>
 __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     allreduce_kernel_vec32(
         ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
-        const uint32_t total_blocks, uint64_t launch_counter,
-        uint32_t *base_u32, size_t count_u32, uint32_t rank, uint32_t tsize)
+        uint32_t *base_u32, size_t offset, size_t count, uint32_t tsize)
 {
-    cg::thread_block          tb   = cg::this_thread_block();
-    cg::grid_group            grid = cg::this_grid();
+    cg::thread_block          tb        = cg::this_thread_block();
+    cg::grid_group            grid      = cg::this_grid();
+    bool                      is_leader = (blockIdx.x == 0);
 
     // Only block 0 participates in cross-GPU barrier (tsize arrivals expected)
-    NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
+    NvlsBar<cg::thread_block> nvls_barrier(
+        tb, tsize, mc_bar, uc_bar, is_leader);
 
     // PRE-BARRIER (hierarchical)
-    if (blockIdx.x == 0) {
+    if (is_leader) {
         nvls_barrier.sync(cuda::memory_order_relaxed);
     }
     // Release all blocks on this GPU
     grid.sync();
 
     // KERNEL EXECUTION
-    size_t chunk_start = ((int64_t)count_u32 * (int64_t)rank) / (int64_t)tsize;
-    size_t chunk_end   = ((int64_t)count_u32 * (int64_t)(rank + 1)) /
-                       (int64_t)tsize;
-    size_t thread_offset = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    size_t stride        = blockDim.x * gridDim.x * 4;
+    uint32_t *ptr    = base_u32 + offset;
+    size_t    stride = blockDim.x * gridDim.x * 4;
+    size_t    tid    = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
 
-    for (size_t idx = chunk_start + thread_offset; idx < chunk_end;
-         idx += stride) {
+    for (size_t idx = tid; idx < count; idx += stride) {
         uint4 val;
-        NvlsOps::ld(val, base_u32 + idx);
-        NvlsOps::st(val, base_u32 + idx);
+        NvlsOps::ld(val, ptr + idx);
+        NvlsOps::st(val, ptr + idx);
     }
 
     // POST-BARRIER (hierarchical)
     grid.sync();
-    if (blockIdx.x == 0) {
+    if (is_leader) {
         nvls_barrier.sync(cuda::memory_order_release);
     }
 }
 
+// vectorized allreduce kernel for 32-bit lanes, single-block launch only
 template <typename NvlsOps>
 __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     allreduce_kernel_vec32_1sm(
         ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
-        const uint32_t total_blocks, uint64_t launch_counter,
-        uint32_t *base_u32, size_t count_u32, uint32_t rank, uint32_t tsize)
+        uint32_t *base_u32, size_t offset, size_t count, uint32_t tsize)
 {
+    // This kernel is for single-block launch only
+    assert(gridDim.x == 1);
+
     cg::thread_block          tb = cg::this_thread_block();
-    // Only block 0 participates in cross-GPU barrier (tsize arrivals expected)
     NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
 
     // PRE-BARRIER
     nvls_barrier.sync(cuda::memory_order_relaxed);
 
-    // KERNEL EXECUTION
-    size_t chunk_start = ((int64_t)count_u32 * (int64_t)rank) / (int64_t)tsize;
-    size_t chunk_end   = ((int64_t)count_u32 * (int64_t)(rank + 1)) /
-                       (int64_t)tsize;
-    size_t thread_offset = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    size_t stride        = blockDim.x * gridDim.x * 4;
+    // KERNEL EXECUTION (single block: simplified indexing)
+    uint32_t *ptr    = base_u32 + offset;
+    size_t    stride = blockDim.x * 4;
 
-    for (size_t idx = chunk_start + thread_offset; idx < chunk_end;
-         idx += stride) {
+    for (size_t idx = threadIdx.x * 4; idx < count; idx += stride) {
         uint4 val;
-        NvlsOps::ld(val, base_u32 + idx);
-        NvlsOps::st(val, base_u32 + idx);
+        NvlsOps::ld(val, ptr + idx);
+        NvlsOps::st(val, ptr + idx);
     }
 
     // POST-BARRIER
@@ -103,34 +99,30 @@ extern "C" {
 ucc_status_t post_allreduce_kernel(
     cudaStream_t stream, uint32_t sm_count, uint32_t threads,
     CUdeviceptr mc_base_addr, size_t src_size_bytes,
-    CUdeviceptr mc_control_addr, CUdeviceptr uc_control_addr,
-    uint64_t launch_counter, uint32_t rank, uint32_t tsize,
-    ucc_datatype_t datatype)
+    CUdeviceptr mc_control_addr, CUdeviceptr uc_control_addr, uint32_t rank,
+    uint32_t tsize, ucc_datatype_t datatype)
 {
+    ucc_tl_cuda_nvls_control_t *mc_bar;
+    ucc_tl_cuda_nvls_control_t *uc_bar;
+    uint32_t                   *base_u32;
+    cudaError_t                 cuda_st;
+    size_t                      count_u32;
+    size_t                      offset;
+    size_t                      count;
+
     assert(sm_count > 0 && sm_count <= UCC_TL_CUDA_MAX_NVLS_SM_COUNT);
     assert(threads > 0 && threads <= UCC_TL_CUDA_MAX_NVLS_THREADS);
-    uint32_t *base_u32  = reinterpret_cast<uint32_t *>(mc_base_addr);
-    size_t    count_u32 = src_size_bytes / sizeof(uint32_t);
-    ucc_tl_cuda_nvls_control_t
-        *mc_bar = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(
-            mc_control_addr);
-    ucc_tl_cuda_nvls_control_t
-        *uc_bar = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(
-            uc_control_addr);
-    uint32_t expected_blocks =
-        sm_count *
-        tsize; // total num of blocks in the multicast group, num gpus * num blocks per gpu, used for barrier synchronization
+
+    base_u32  = reinterpret_cast<uint32_t *>(mc_base_addr);
+    count_u32 = src_size_bytes / sizeof(uint32_t);
+    mc_bar    = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(mc_control_addr);
+    uc_bar    = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(uc_control_addr);
+    // compute chunk boundaries on host instead of in kernel
+    offset    = (count_u32 * rank) / tsize;
+    count     = (count_u32 * (rank + 1)) / tsize - offset;
 
     void *kernel_args[] = {
-        &mc_bar,
-        &uc_bar,
-        &expected_blocks,
-        &launch_counter,
-        &base_u32,
-        &count_u32,
-        &rank,
-        &tsize};
-    cudaError_t cuda_st;
+        &mc_bar, &uc_bar, &base_u32, &offset, &count, &tsize};
 
     switch (datatype) {
     case UCC_DT_FLOAT32:

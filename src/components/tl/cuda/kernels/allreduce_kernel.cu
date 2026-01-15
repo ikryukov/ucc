@@ -31,8 +31,8 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         const uint32_t total_blocks, uint64_t launch_counter,
         uint32_t *base_u32, size_t count_u32, uint32_t rank, uint32_t tsize)
 {
-    cg::thread_block tb   = cg::this_thread_block();
-    cg::grid_group   grid = cg::this_grid();
+    cg::thread_block          tb   = cg::this_thread_block();
+    cg::grid_group            grid = cg::this_grid();
 
     // Only block 0 participates in cross-GPU barrier (tsize arrivals expected)
     NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
@@ -46,9 +46,9 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     grid.sync();
 
     // === KERNEL EXECUTION ===
-    size_t chunk_start   = ((int64_t)count_u32 * (int64_t)rank) / (int64_t)tsize;
-    size_t chunk_end     = ((int64_t)count_u32 * (int64_t)(rank + 1)) /
-                           (int64_t)tsize;
+    size_t chunk_start = ((int64_t)count_u32 * (int64_t)rank) / (int64_t)tsize;
+    size_t chunk_end   = ((int64_t)count_u32 * (int64_t)(rank + 1)) /
+                       (int64_t)tsize;
     size_t thread_offset = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
     size_t stride        = blockDim.x * gridDim.x * 4;
 
@@ -68,6 +68,38 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     }
     // Phase 3: Release all blocks on this GPU
     grid.sync();
+}
+
+template <typename NvlsOps>
+__global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
+    allreduce_kernel_vec32_1sm(
+        ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
+        const uint32_t total_blocks, uint64_t launch_counter,
+        uint32_t *base_u32, size_t count_u32, uint32_t rank, uint32_t tsize)
+{
+    cg::thread_block          tb = cg::this_thread_block();
+    // Only block 0 participates in cross-GPU barrier (tsize arrivals expected)
+    NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
+
+    // === PRE-BARRIER ===
+    nvls_barrier.sync(cuda::memory_order_relaxed);
+
+    // === KERNEL EXECUTION ===
+    size_t chunk_start = ((int64_t)count_u32 * (int64_t)rank) / (int64_t)tsize;
+    size_t chunk_end   = ((int64_t)count_u32 * (int64_t)(rank + 1)) /
+                       (int64_t)tsize;
+    size_t thread_offset = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
+    size_t stride        = blockDim.x * gridDim.x * 4;
+
+    for (size_t idx = chunk_start + thread_offset; idx < chunk_end;
+         idx += stride) {
+        uint4 val;
+        NvlsOps::ld(val, base_u32 + idx);
+        NvlsOps::st(val, base_u32 + idx);
+    }
+
+    // === POST-BARRIER ===
+    nvls_barrier.sync(cuda::memory_order_release);
 }
 
 #ifdef __cplusplus
@@ -95,23 +127,57 @@ ucc_status_t post_allreduce_kernel(
         sm_count *
         tsize; // total num of blocks in the multicast group, num gpus * num blocks per gpu, used for barrier synchronization
 
-    void *kernel_args[] = {&mc_bar,         &uc_bar,    &expected_blocks,
-                           &launch_counter, &base_u32,  &count_u32,
-                           &rank,           &tsize};
+    void *kernel_args[] = {
+        &mc_bar,
+        &uc_bar,
+        &expected_blocks,
+        &launch_counter,
+        &base_u32,
+        &count_u32,
+        &rank,
+        &tsize};
     cudaError_t cuda_st;
 
     switch (datatype) {
     case UCC_DT_FLOAT32:
         assert(((uintptr_t)(mc_base_addr) % 8) == 0);
-        cuda_st = cudaLaunchCooperativeKernel(
-            (void *)allreduce_kernel_vec32<NvlsFp32Ops>, dim3(sm_count),
-            dim3(threads), kernel_args, 0, stream);
+        if (sm_count == 1) {
+            cuda_st = cudaLaunchCooperativeKernel(
+                (void *)allreduce_kernel_vec32_1sm<NvlsFp32Ops>,
+                dim3(sm_count),
+                dim3(threads),
+                kernel_args,
+                0,
+                stream);
+        } else {
+            cuda_st = cudaLaunchCooperativeKernel(
+                (void *)allreduce_kernel_vec32<NvlsFp32Ops>,
+                dim3(sm_count),
+                dim3(threads),
+                kernel_args,
+                0,
+                stream);
+        }
         break;
     case UCC_DT_BFLOAT16:
         assert(((uintptr_t)(mc_base_addr) % 8) == 0);
-        cuda_st = cudaLaunchCooperativeKernel(
-            (void *)allreduce_kernel_vec32<NvlsBf16Ops>, dim3(sm_count),
-            dim3(threads), kernel_args, 0, stream);
+        if (sm_count == 1) {
+            cuda_st = cudaLaunchCooperativeKernel(
+                (void *)allreduce_kernel_vec32_1sm<NvlsBf16Ops>,
+                dim3(sm_count),
+                dim3(threads),
+                kernel_args,
+                0,
+                stream);
+        } else {
+            cuda_st = cudaLaunchCooperativeKernel(
+                (void *)allreduce_kernel_vec32<NvlsBf16Ops>,
+                dim3(sm_count),
+                dim3(threads),
+                kernel_args,
+                0,
+                stream);
+        }
         break;
     default:
         return UCC_ERR_NOT_SUPPORTED;

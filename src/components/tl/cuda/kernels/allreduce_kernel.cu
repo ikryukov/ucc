@@ -23,7 +23,6 @@ namespace cg = cooperative_groups;
 // Uses two-level hierarchical barrier:
 //   1. grid.sync() - all blocks on this GPU sync
 //   2. Block 0 does NVLS cross-GPU barrier
-//   3. grid.sync() - release all blocks
 template <typename NvlsOps>
 __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     allreduce_kernel_vec32(
@@ -37,15 +36,14 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     // Only block 0 participates in cross-GPU barrier (tsize arrivals expected)
     NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
 
-    // === PRE-BARRIER (hierarchical) ===
-    // Block 0 does cross-GPU NVLS barrier
+    // PRE-BARRIER (hierarchical)
     if (blockIdx.x == 0) {
         nvls_barrier.sync(cuda::memory_order_relaxed);
     }
     // Release all blocks on this GPU
     grid.sync();
 
-    // === KERNEL EXECUTION ===
+    // KERNEL EXECUTION
     size_t chunk_start = ((int64_t)count_u32 * (int64_t)rank) / (int64_t)tsize;
     size_t chunk_end   = ((int64_t)count_u32 * (int64_t)(rank + 1)) /
                        (int64_t)tsize;
@@ -59,14 +57,11 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         NvlsOps::st(val, base_u32 + idx);
     }
 
-    // === POST-BARRIER (hierarchical) ===
-    // Phase 1: All blocks on this GPU sync
+    // POST-BARRIER (hierarchical)
     grid.sync();
-    // Phase 2: Block 0 does cross-GPU NVLS barrier
     if (blockIdx.x == 0) {
         nvls_barrier.sync(cuda::memory_order_release);
     }
-    // Phase 3: Release all blocks on this GPU
     grid.sync();
 }
 
@@ -81,10 +76,10 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     // Only block 0 participates in cross-GPU barrier (tsize arrivals expected)
     NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
 
-    // === PRE-BARRIER ===
+    // PRE-BARRIER
     nvls_barrier.sync(cuda::memory_order_relaxed);
 
-    // === KERNEL EXECUTION ===
+    // KERNEL EXECUTION
     size_t chunk_start = ((int64_t)count_u32 * (int64_t)rank) / (int64_t)tsize;
     size_t chunk_end   = ((int64_t)count_u32 * (int64_t)(rank + 1)) /
                        (int64_t)tsize;
@@ -98,7 +93,7 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         NvlsOps::st(val, base_u32 + idx);
     }
 
-    // === POST-BARRIER ===
+    // POST-BARRIER
     nvls_barrier.sync(cuda::memory_order_release);
 }
 

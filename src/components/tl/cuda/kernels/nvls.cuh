@@ -58,72 +58,70 @@ struct NvlsControlLayout {
 };
 
 template <typename Cooperative> struct NvlsBar {
-    Cooperative cooperative;
-    uint32_t    base;
-    uint32_t    tsize;
-    uint32_t   *mc_counter_ptr;
-    uint32_t   *uc_counter_ptr;
-    bool        is_leader;
+    Cooperative                cooperative;
+    uint32_t                   base;
+    uint32_t                   tsize;
+    NvlsControlLayout         *mc_ctrl;
+    NvlsControlLayout         *uc_ctrl;
+    bool                       is_leader;
 
     // Constructor for multi-block kernels: only leader block updates counter
-    __device__  NvlsBar(
-         Cooperative coop, uint32_t tsize, void *mc_control_ptr,
-         void *uc_control_ptr, bool is_leader)
+    __device__ __forceinline__ NvlsBar(
+        Cooperative coop, uint32_t tsize, void *mc_control_ptr,
+        void *uc_control_ptr, bool is_leader)
         : cooperative(coop),
           base(reinterpret_cast<NvlsControlLayout *>(uc_control_ptr)->base),
           tsize(tsize),
-          mc_counter_ptr(
-              &reinterpret_cast<NvlsControlLayout *>(mc_control_ptr)->counter),
-          uc_counter_ptr(
-              &reinterpret_cast<NvlsControlLayout *>(uc_control_ptr)->counter),
+          mc_ctrl(reinterpret_cast<NvlsControlLayout *>(mc_control_ptr)),
+          uc_ctrl(reinterpret_cast<NvlsControlLayout *>(uc_control_ptr)),
           is_leader(is_leader)
     {
     }
 
     // Constructor for single-block kernels (backward compatible)
-    __device__ NvlsBar(
+    __device__ __forceinline__ NvlsBar(
         Cooperative coop, uint32_t tsize, void *mc_control_ptr,
         void *uc_control_ptr)
         : NvlsBar(coop, tsize, mc_control_ptr, uc_control_ptr, true)
     {
     }
 
-    __device__ ~NvlsBar()
+    __device__ __forceinline__ ~NvlsBar()
     {
-        // Only leader block updates the counter to avoid race conditions
+        // Only leader block updates base for next launch
+        // Counter is already correct from multicast atomic adds in arrive()
         if (is_leader && cooperative.thread_rank() == 0) {
-            *uc_counter_ptr = base;
+            uc_ctrl->base = base;
         }
         cooperative.sync();
     }
 
-    __device__ void arrive(cuda::memory_order order)
+    __device__ __forceinline__ void arrive(cuda::memory_order order)
     {
         cooperative.sync();
         if (cooperative.thread_rank() == 0) {
             if (order == cuda::memory_order_release) {
                 asm volatile(
                     "multimem.red.release.sys.global.add.u32 [%0], %1;" ::"l"(
-                        mc_counter_ptr),
+                        &mc_ctrl->counter),
                     "n"(1)
                     : "memory");
             } else if (order == cuda::memory_order_relaxed) {
                 asm volatile("multimem.red.global.add.u32 [%0], %1;" ::"l"(
-                                 mc_counter_ptr),
+                                 &mc_ctrl->counter),
                              "n"(1)
                              : "memory");
             } else {
                 assert(false);
             }
-            // asm volatile("fence.proxy.alias;" ::: "memory"); // for future ?
         }
     }
 
-    __device__ void wait(cuda::memory_order order)
+    __device__ __forceinline__ void wait(cuda::memory_order order)
     {
         if (cooperative.thread_rank() == 0) {
             cuda::atomic_ref<uint32_t, cuda::thread_scope_system> ac(
-                *uc_counter_ptr);
+                uc_ctrl->counter);
             uint32_t expected = base + tsize;
             while (ac.load(
                        order == cuda::memory_order_relaxed
@@ -137,31 +135,48 @@ template <typename Cooperative> struct NvlsBar {
         cooperative.sync();
     }
 
-    __device__ void sync(cuda::memory_order order)
+    __device__ __forceinline__ void sync(cuda::memory_order order)
     {
         arrive(order);
         wait(order);
     }
 };
 
+// Vectorized 128-bit load/store (LDG.E.128 / STG.E.128)
+__device__ __forceinline__ void vec_ld(uint4 &v, const uint32_t *ptr)
+{
+    asm("ld.global.v4.u32 {%0,%1,%2,%3}, [%4];"
+        : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
+        : "l"(ptr)
+        : "memory");
+}
+
+__device__ __forceinline__ void vec_st(const uint4 &v, uint32_t *ptr)
+{
+    asm volatile("st.global.v4.u32 [%0], {%1,%2,%3,%4};"
+                 :
+                 : "l"(ptr), "r"(v.x), "r"(v.y), "r"(v.z), "r"(v.w)
+                 : "memory");
+}
+
 // Traits wrapping NVLS LD/ST variants on 32-bit lanes
 struct NvlsFp32Ops {
-    __device__ static inline void ld(uint4 &v, const uint32_t *ptr)
+    __device__ __forceinline__ static void ld(uint4 &v, const uint32_t *ptr)
     {
         MULTIMEM_LD(v, ptr);
     }
-    __device__ static inline void st(const uint4 &v, uint32_t *ptr)
+    __device__ __forceinline__ static void st(const uint4 &v, uint32_t *ptr)
     {
         MULTIMEM_ST(v, ptr);
     }
 };
 
 struct NvlsBf16Ops {
-    __device__ static inline void ld(uint4 &v, const uint32_t *ptr)
+    __device__ __forceinline__ static void ld(uint4 &v, const uint32_t *ptr)
     {
         MULTIMEM_LD_BF16(v, ptr);
     }
-    __device__ static inline void st(const uint4 &v, uint32_t *ptr)
+    __device__ __forceinline__ static void st(const uint4 &v, uint32_t *ptr)
     {
         MULTIMEM_ST_BF16(v, ptr);
     }

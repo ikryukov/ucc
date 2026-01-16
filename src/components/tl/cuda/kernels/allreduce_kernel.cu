@@ -92,6 +92,43 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     nvls_barrier.sync(cuda::memory_order_release);
 }
 
+// Low-latency allreduce: copy to NVLS buffer, reduce, copy back
+// Single-block launch only, for small messages
+template <typename NvlsOps>
+__global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
+    allreduce_kernel_vec32_lowlatency(
+        ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
+        const uint32_t *__restrict__ src_u32, uint32_t *__restrict__ dst_u32,
+        uint32_t *__restrict__ mc_nvls_u32, uint32_t *__restrict__ uc_nvls_u32,
+        size_t count_u32, uint32_t tsize)
+{
+    cg::thread_block          tb = cg::this_thread_block();
+    NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
+
+    size_t                    stride = blockDim.x * 4;
+    size_t                    tid    = threadIdx.x * 4;
+
+    // Stage 1: Vectorized copy from src to NVLS unicast buffer
+    for (size_t idx = tid; idx < count_u32; idx += stride) {
+        uint4 val = reinterpret_cast<const uint4 *>(src_u32 + idx)[0];
+        reinterpret_cast<uint4 *>(uc_nvls_u32 + idx)[0] = val;
+        // uint4 val;
+        // vec_ld(val, src_u32 + idx);
+        // vec_st(val, uc_nvls_u32 + idx);
+    }
+
+    // PRE-BARRIER: ensure all GPUs have copied to their NVLS buffers
+    nvls_barrier.sync(cuda::memory_order_release);
+
+    // Stage 2: NVLS reduce (read via multicast, store to dst)
+    for (size_t idx = tid; idx < count_u32; idx += stride) {
+        uint4 val;
+        NvlsOps::ld(val, mc_nvls_u32 + idx);
+        // vec_st(val, dst_u32 + idx);
+        reinterpret_cast<uint4 *>(dst_u32 + idx)[0] = val;
+    }
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -121,12 +158,17 @@ ucc_status_t post_allreduce_kernel(
     offset    = (count_u32 * rank) / tsize;
     count     = (count_u32 * (rank + 1)) / tsize - offset;
 
+    // Verify alignment requirements for vectorized uint4 access
+    assert(count_u32 % 4 == 0); // total count must be 16-byte aligned
+    assert(offset % 4 == 0);    // chunk offset must be 16-byte aligned
+    assert(count % 4 == 0);     // chunk count must be 16-byte aligned
+
     void *kernel_args[] = {
         &mc_bar, &uc_bar, &base_u32, &offset, &count, &tsize};
 
     switch (datatype) {
     case UCC_DT_FLOAT32:
-        assert(((uintptr_t)(mc_base_addr) % 8) == 0);
+        assert(((uintptr_t)(mc_base_addr) % 16) == 0);
         if (sm_count == 1) {
             cuda_st = cudaLaunchCooperativeKernel(
                 (void *)allreduce_kernel_vec32_1sm<NvlsFp32Ops>,
@@ -146,7 +188,7 @@ ucc_status_t post_allreduce_kernel(
         }
         break;
     case UCC_DT_BFLOAT16:
-        assert(((uintptr_t)(mc_base_addr) % 8) == 0);
+        assert(((uintptr_t)(mc_base_addr) % 16) == 0);
         if (sm_count == 1) {
             cuda_st = cudaLaunchCooperativeKernel(
                 (void *)allreduce_kernel_vec32_1sm<NvlsBf16Ops>,
@@ -164,6 +206,74 @@ ucc_status_t post_allreduce_kernel(
                 0,
                 stream);
         }
+        break;
+    default:
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+    if (cuda_st != cudaSuccess) {
+        return cuda_error_to_ucc_status(cuda_st);
+    }
+
+    return UCC_OK;
+}
+
+ucc_status_t post_allreduce_lowlatency_kernel(
+    cudaStream_t stream, uint32_t threads, CUdeviceptr src_ptr,
+    CUdeviceptr dst_ptr, CUdeviceptr mc_nvls_ptr, CUdeviceptr uc_nvls_ptr,
+    size_t src_size_bytes, CUdeviceptr mc_control_addr,
+    CUdeviceptr uc_control_addr, uint32_t tsize, ucc_datatype_t datatype)
+{
+    ucc_tl_cuda_nvls_control_t *mc_bar;
+    ucc_tl_cuda_nvls_control_t *uc_bar;
+    uint32_t                   *src_u32;
+    uint32_t                   *dst_u32;
+    uint32_t                   *uc_nvls_u32;
+    uint32_t                   *mc_nvls_u32;
+    cudaError_t                 cuda_st;
+    size_t                      count_u32;
+
+    assert(threads > 0 && threads <= UCC_TL_CUDA_MAX_NVLS_THREADS);
+
+    src_u32     = reinterpret_cast<uint32_t *>(src_ptr);
+    dst_u32     = reinterpret_cast<uint32_t *>(dst_ptr);
+    uc_nvls_u32 = reinterpret_cast<uint32_t *>(uc_nvls_ptr);
+    mc_nvls_u32 = reinterpret_cast<uint32_t *>(mc_nvls_ptr);
+    count_u32   = src_size_bytes / sizeof(uint32_t);
+    mc_bar = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(mc_control_addr);
+    uc_bar = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(uc_control_addr);
+
+    assert(((uintptr_t)(mc_nvls_ptr) % 16) == 0);
+    assert(((uintptr_t)(uc_nvls_ptr) % 16) == 0);
+    assert(((uintptr_t)(mc_control_addr) % 16) == 0);
+
+    void *kernel_args[] = {
+        &mc_bar,
+        &uc_bar,
+        &src_u32,
+        &dst_u32,
+        &mc_nvls_u32,
+        &uc_nvls_u32,
+        &count_u32,
+        &tsize};
+
+    switch (datatype) {
+    case UCC_DT_FLOAT32:
+        cuda_st = cudaLaunchCooperativeKernel(
+            (void *)allreduce_kernel_vec32_lowlatency<NvlsFp32Ops>,
+            dim3(1),
+            dim3(threads),
+            kernel_args,
+            0,
+            stream);
+        break;
+    case UCC_DT_BFLOAT16:
+        cuda_st = cudaLaunchCooperativeKernel(
+            (void *)allreduce_kernel_vec32_lowlatency<NvlsBf16Ops>,
+            dim3(1),
+            dim3(threads),
+            kernel_args,
+            0,
+            stream);
         break;
     default:
         return UCC_ERR_NOT_SUPPORTED;

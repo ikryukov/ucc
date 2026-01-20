@@ -25,20 +25,15 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         uint32_t *base_u32, size_t offset, size_t count, uint32_t *dst_u32,
         uint32_t tsize)
 {
-    cg::thread_block          tb        = cg::this_thread_block();
-    cg::grid_group            grid      = cg::this_grid();
-    bool                      is_leader = (blockIdx.x == 0);
+    cg::grid_group grid = cg::this_grid();
+    NvlsBar        nvls_barrier(tsize, mc_bar, uc_bar);
 
-    // Only leader block participates in cross-GPU barrier
-    NvlsBar<cg::thread_block> nvls_barrier(
-        tb, tsize, mc_bar, uc_bar, is_leader);
-
-    // PRE-BARRIER (hierarchical)
-    if (is_leader) {
+    // PRE-BARRIER: block 0 does cross-GPU sync
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
         nvls_barrier.sync(cuda::memory_order_relaxed);
+        nvls_barrier.commit();
     }
-    // Release all blocks on this GPU
-    grid.sync();
+    grid.sync(); // release all blocks on this GPU
 
     // KERNEL EXECUTION
     uint32_t *src_ptr = base_u32 + offset;

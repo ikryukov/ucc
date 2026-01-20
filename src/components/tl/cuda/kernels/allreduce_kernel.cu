@@ -29,20 +29,14 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
         uint32_t *base_u32, size_t offset, size_t count, uint32_t tsize)
 {
-    cg::thread_block          tb        = cg::this_thread_block();
-    cg::grid_group            grid      = cg::this_grid();
-    bool                      is_leader = (blockIdx.x == 0);
+    cg::grid_group grid = cg::this_grid();
+    NvlsBar        nvls_barrier(tsize, mc_bar, uc_bar);
 
-    // Only block 0 participates in cross-GPU barrier (tsize arrivals expected)
-    NvlsBar<cg::thread_block> nvls_barrier(
-        tb, tsize, mc_bar, uc_bar, is_leader);
-
-    // PRE-BARRIER (hierarchical)
-    if (is_leader) {
+    // PRE-BARRIER: block 0 thread 0 does cross-GPU sync
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
         nvls_barrier.sync(cuda::memory_order_relaxed);
     }
-    // Release all blocks on this GPU
-    grid.sync();
+    grid.sync(); // release all blocks on this GPU
 
     // KERNEL EXECUTION
     uint32_t *ptr    = base_u32 + offset;
@@ -55,10 +49,11 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         NvlsOps::st(val, ptr + idx);
     }
 
-    // POST-BARRIER (hierarchical)
+    // POST-BARRIER: gather all blocks, then cross-GPU sync
     grid.sync();
-    if (is_leader) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
         nvls_barrier.sync(cuda::memory_order_release);
+        nvls_barrier.commit();
     }
 }
 
@@ -69,27 +64,32 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
         uint32_t *base_u32, size_t offset, size_t count, uint32_t tsize)
 {
-    // This kernel is for single-block launch only
-    assert(gridDim.x == 1);
+    NvlsBar nvls_barrier(tsize, mc_bar, uc_bar);
 
-    cg::thread_block          tb = cg::this_thread_block();
-    NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
-
-    // PRE-BARRIER
-    nvls_barrier.sync(cuda::memory_order_relaxed);
+    // PRE-BARRIER: wait for all GPUs to be ready
+    if (threadIdx.x == 0) {
+        nvls_barrier.sync(cuda::memory_order_relaxed);
+    }
+    __syncthreads();
 
     // KERNEL EXECUTION (single block: simplified indexing)
-    uint32_t *ptr    = base_u32 + offset;
+    uint32_t *ptr    = base_u32 + offset + threadIdx.x * 4;
+    uint32_t *end    = base_u32 + offset + count;
     size_t    stride = blockDim.x * 4;
 
-    for (size_t idx = threadIdx.x * 4; idx < count; idx += stride) {
+#pragma unroll 1
+    for (; ptr < end; ptr += stride) {
         uint4 val;
-        NvlsOps::ld(val, ptr + idx);
-        NvlsOps::st(val, ptr + idx);
+        NvlsOps::ld(val, ptr);
+        NvlsOps::st(val, ptr);
     }
 
-    // POST-BARRIER
-    nvls_barrier.sync(cuda::memory_order_release);
+    // POST-BARRIER: signal completion and wait for all GPUs
+    if (threadIdx.x == 0) {
+        nvls_barrier.sync(cuda::memory_order_release);
+        nvls_barrier.commit();
+    }
+    __syncthreads();
 }
 
 // Low-latency allreduce: copy to NVLS buffer, reduce, copy back
@@ -102,29 +102,28 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         uint32_t *__restrict__ mc_nvls_u32, uint32_t *__restrict__ uc_nvls_u32,
         size_t count_u32, uint32_t tsize)
 {
-    cg::thread_block          tb = cg::this_thread_block();
-    NvlsBar<cg::thread_block> nvls_barrier(tb, tsize, mc_bar, uc_bar);
+    NvlsBar nvls_barrier(tsize, mc_bar, uc_bar);
 
-    size_t                    stride = blockDim.x * 4;
-    size_t                    tid    = threadIdx.x * 4;
+    size_t  stride = blockDim.x * 4;
+    size_t  tid    = threadIdx.x * 4;
 
     // Stage 1: Vectorized copy from src to NVLS unicast buffer
     for (size_t idx = tid; idx < count_u32; idx += stride) {
         uint4 val = reinterpret_cast<const uint4 *>(src_u32 + idx)[0];
         reinterpret_cast<uint4 *>(uc_nvls_u32 + idx)[0] = val;
-        // uint4 val;
-        // vec_ld(val, src_u32 + idx);
-        // vec_st(val, uc_nvls_u32 + idx);
     }
 
-    // PRE-BARRIER: ensure all GPUs have copied to their NVLS buffers
-    nvls_barrier.sync(cuda::memory_order_release);
+    // BARRIER: ensure all GPUs have copied to their NVLS buffers
+    if (threadIdx.x == 0) {
+        nvls_barrier.sync(cuda::memory_order_release);
+        nvls_barrier.commit();
+    }
+    __syncthreads();
 
     // Stage 2: NVLS reduce (read via multicast, store to dst)
     for (size_t idx = tid; idx < count_u32; idx += stride) {
         uint4 val;
         NvlsOps::ld(val, mc_nvls_u32 + idx);
-        // vec_st(val, dst_u32 + idx);
         reinterpret_cast<uint4 *>(dst_u32 + idx)[0] = val;
     }
 }

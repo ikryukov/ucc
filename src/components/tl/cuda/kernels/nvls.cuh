@@ -90,7 +90,7 @@ struct NvlsBar {
                          : "memory");
         }
         // Critical: ensure NVLS writes are visible before proceeding
-        asm volatile("fence.proxy.alias;" ::: "memory");
+        // asm volatile("fence.proxy.alias;" ::: "memory");
     }
 
     // Wait: spin until all GPUs have arrived

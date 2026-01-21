@@ -39,14 +39,15 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     grid.sync(); // release all blocks on this GPU
 
     // KERNEL EXECUTION
-    uint32_t *ptr    = base_u32 + offset;
-    size_t    stride = blockDim.x * gridDim.x * 4;
     size_t    tid    = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
+    uint32_t *ptr    = base_u32 + offset + tid;
+    uint32_t *end    = base_u32 + offset + count;
+    size_t    stride = blockDim.x * gridDim.x * 4;
 
-    for (size_t idx = tid; idx < count; idx += stride) {
+    for (; ptr < end; ptr += stride) {
         uint4 val;
-        NvlsOps::ld(val, ptr + idx);
-        NvlsOps::st(val, ptr + idx);
+        NvlsOps::ld(val, ptr);
+        NvlsOps::st(val, ptr);
     }
 
     // POST-BARRIER: gather all blocks, then cross-GPU sync
@@ -77,7 +78,7 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     uint32_t *end    = base_u32 + offset + count;
     size_t    stride = blockDim.x * 4;
 
-#pragma unroll 1
+    // #pragma unroll 1
     for (; ptr < end; ptr += stride) {
         uint4 val;
         NvlsOps::ld(val, ptr);
@@ -89,11 +90,50 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         nvls_barrier.sync(cuda::memory_order_release);
         nvls_barrier.commit();
     }
-    __syncthreads();
+    // __syncthreads();
 }
 
-// Low-latency allreduce: copy to NVLS buffer, reduce, copy back
-// Single-block launch only, for small messages
+// Ultra low-latency allreduce for messages <= 16KB
+// Single-block (1024 threads), NO LOOPS - each thread handles 1 element max
+// 1024 threads * 16 bytes = 16KB coverage
+template <typename NvlsOps>
+__global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
+    allreduce_kernel_vec32_lowlatency_small(
+        ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
+        const uint32_t *__restrict__ src_u32, uint32_t *__restrict__ dst_u32,
+        uint32_t *__restrict__ mc_nvls_u32, uint32_t *__restrict__ uc_nvls_u32,
+        size_t count_u32, uint32_t tsize)
+{
+    NvlsBar nvls_barrier(tsize, mc_bar, uc_bar);
+
+    // Each thread handles one uint4 (16 bytes = 4 u32s)
+    size_t  tid = threadIdx.x * 4;
+
+    // Stage 1: Copy src -> NVLS unicast buffer (no loop)
+    if (tid < count_u32) {
+        reinterpret_cast<uint4 *>(
+            uc_nvls_u32 +
+            tid)[0] = reinterpret_cast<const uint4 *>(src_u32 + tid)[0];
+    }
+
+    // BARRIER: ensure all GPUs have copied to their NVLS buffers
+    if (threadIdx.x == 0) {
+        nvls_barrier.sync(cuda::memory_order_release);
+        nvls_barrier.commit();
+    }
+    __syncthreads();
+
+    // Stage 2: NVLS reduce -> dst (no loop)
+    if (tid < count_u32) {
+        uint4 val;
+        NvlsOps::ld(val, mc_nvls_u32 + tid);
+        reinterpret_cast<uint4 *>(dst_u32 + tid)[0] = val;
+    }
+}
+
+// Low-latency allreduce: copy to NVLS buffer, reduce, save to dst
+// Single-block launch only, for messages 16KB-64KB
+// Optimized: pointer-based iteration eliminates per-iteration shl.b64
 template <typename NvlsOps>
 __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     allreduce_kernel_vec32_lowlatency(
@@ -102,15 +142,20 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
         uint32_t *__restrict__ mc_nvls_u32, uint32_t *__restrict__ uc_nvls_u32,
         size_t count_u32, uint32_t tsize)
 {
-    NvlsBar nvls_barrier(tsize, mc_bar, uc_bar);
+    NvlsBar         nvls_barrier(tsize, mc_bar, uc_bar);
 
-    size_t  stride = blockDim.x * 4;
-    size_t  tid    = threadIdx.x * 4;
+    // Pre-compute pointers (eliminates shl.b64 per iteration)
+    size_t          tid     = threadIdx.x * 4;
+    size_t          stride  = blockDim.x * 4;
+    const uint32_t *src_ptr = src_u32 + tid;
+    const uint32_t *src_end = src_u32 + count_u32;
+    uint32_t       *uc_ptr  = uc_nvls_u32 + tid;
 
     // Stage 1: Vectorized copy from src to NVLS unicast buffer
-    for (size_t idx = tid; idx < count_u32; idx += stride) {
-        uint4 val = reinterpret_cast<const uint4 *>(src_u32 + idx)[0];
-        reinterpret_cast<uint4 *>(uc_nvls_u32 + idx)[0] = val;
+#pragma unroll 1
+    for (; src_ptr < src_end; src_ptr += stride, uc_ptr += stride) {
+        reinterpret_cast<uint4 *>(uc_ptr)[0] = reinterpret_cast<const uint4 *>(
+            src_ptr)[0];
     }
 
     // BARRIER: ensure all GPUs have copied to their NVLS buffers
@@ -121,10 +166,15 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     __syncthreads();
 
     // Stage 2: NVLS reduce (read via multicast, store to dst)
-    for (size_t idx = tid; idx < count_u32; idx += stride) {
+    const uint32_t *mc_ptr  = mc_nvls_u32 + tid;
+    const uint32_t *mc_end  = mc_nvls_u32 + count_u32;
+    uint32_t       *dst_ptr = dst_u32 + tid;
+
+#pragma unroll 1
+    for (; mc_ptr < mc_end; mc_ptr += stride, dst_ptr += stride) {
         uint4 val;
-        NvlsOps::ld(val, mc_nvls_u32 + idx);
-        reinterpret_cast<uint4 *>(dst_u32 + idx)[0] = val;
+        NvlsOps::ld(val, mc_ptr);
+        reinterpret_cast<uint4 *>(dst_ptr)[0] = val;
     }
 }
 
@@ -255,24 +305,48 @@ ucc_status_t post_allreduce_lowlatency_kernel(
         &count_u32,
         &tsize};
 
+    // Choose kernel: <=16KB uses no-loop version, >16KB uses loop version
+    // 16KB = 16384 bytes = 4096 u32 elements
+    bool use_small_kernel = (src_size_bytes <= 16 * 1024);
+
     switch (datatype) {
     case UCC_DT_FLOAT32:
-        cuda_st = cudaLaunchCooperativeKernel(
-            (void *)allreduce_kernel_vec32_lowlatency<NvlsFp32Ops>,
-            dim3(1),
-            dim3(threads),
-            kernel_args,
-            0,
-            stream);
+        if (use_small_kernel) {
+            cuda_st = cudaLaunchKernel(
+                (void *)allreduce_kernel_vec32_lowlatency_small<NvlsFp32Ops>,
+                dim3(1),
+                dim3(threads),
+                kernel_args,
+                0,
+                stream);
+        } else {
+            cuda_st = cudaLaunchKernel(
+                (void *)allreduce_kernel_vec32_lowlatency<NvlsFp32Ops>,
+                dim3(1),
+                dim3(threads),
+                kernel_args,
+                0,
+                stream);
+        }
         break;
     case UCC_DT_BFLOAT16:
-        cuda_st = cudaLaunchCooperativeKernel(
-            (void *)allreduce_kernel_vec32_lowlatency<NvlsBf16Ops>,
-            dim3(1),
-            dim3(threads),
-            kernel_args,
-            0,
-            stream);
+        if (use_small_kernel) {
+            cuda_st = cudaLaunchKernel(
+                (void *)allreduce_kernel_vec32_lowlatency_small<NvlsBf16Ops>,
+                dim3(1),
+                dim3(threads),
+                kernel_args,
+                0,
+                stream);
+        } else {
+            cuda_st = cudaLaunchKernel(
+                (void *)allreduce_kernel_vec32_lowlatency<NvlsBf16Ops>,
+                dim3(1),
+                dim3(threads),
+                kernel_args,
+                0,
+                stream);
+        }
         break;
     default:
         return UCC_ERR_NOT_SUPPORTED;

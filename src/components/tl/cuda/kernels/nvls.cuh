@@ -55,7 +55,46 @@
 struct NvlsControlLayout {
     uint32_t base;
     uint32_t counter;
+    uint32_t grid_barrier; // For lightweight grid sync (4-CTA kernels)
+    uint32_t _pad;         // Padding for 16-byte alignment
 };
+
+// Sense-reversing grid barrier for small number of CTAs
+// Supports multiple barriers per kernel without explicit reset
+// Uses grid_barrier field: lower 16 bits = count, upper 16 bits = sense
+__device__ __forceinline__ void
+grid_barrier_sync(NvlsControlLayout *uc_ctrl, uint32_t num_blocks)
+{
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        // Read current sense (upper 16 bits)
+        uint32_t old_val   = atomicAdd(&uc_ctrl->grid_barrier, 0);
+        uint32_t old_sense = old_val & 0xFFFF0000;
+
+        // Increment counter and get new value
+        uint32_t new_val   = atomicAdd(&uc_ctrl->grid_barrier, 1) + 1;
+        uint32_t new_count = new_val & 0x0000FFFF;
+
+        if (new_count == num_blocks) {
+            // Last block: flip sense and reset count
+            uint32_t next_sense   = old_sense ^ 0x00010000;
+            uc_ctrl->grid_barrier = next_sense;
+        } else {
+            // Wait for sense to flip
+            uint32_t target_sense = old_sense ^ 0x00010000;
+            while ((atomicAdd(&uc_ctrl->grid_barrier, 0) & 0xFFFF0000) !=
+                   target_sense) {
+            }
+        }
+    }
+    __syncthreads();
+}
+
+// Reset grid barrier (call once at init time, not needed between barriers)
+__device__ __forceinline__ void grid_barrier_reset(NvlsControlLayout *uc_ctrl)
+{
+    uc_ctrl->grid_barrier = 0;
+}
 
 // Optimized NVLS barrier - minimal overhead, explicit sync control
 struct NvlsBar {

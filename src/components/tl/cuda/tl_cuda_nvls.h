@@ -72,6 +72,8 @@ typedef struct ucc_tl_cuda_nvls {
 typedef struct ucc_tl_cuda_nvls_control {
     uint32_t base;
     uint32_t counter;
+    uint32_t grid_barrier; // For lightweight grid sync (4-CTA kernels)
+    uint32_t _pad;         // Padding for 16-byte alignment
 } ucc_tl_cuda_nvls_control_t;
 
 ucc_status_t ucc_tl_cuda_nvls_check_support(

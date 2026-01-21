@@ -18,6 +18,44 @@ extern "C" {
 
 namespace cg = cooperative_groups;
 
+// Specialized 4-CTA kernel for 1-2MB messages
+// Uses lightweight atomic barrier (in uc_bar->grid_barrier) instead of grid.sync()
+template <typename NvlsOps>
+__global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
+    reduce_scatter_kernel_4cta(
+        ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
+        uint32_t *base_u32, size_t offset, size_t count, uint32_t *dst_u32,
+        uint32_t tsize)
+{
+    NvlsBar            nvls_barrier(tsize, mc_bar, uc_bar);
+    NvlsControlLayout *uc_ctrl =
+        reinterpret_cast<NvlsControlLayout *>(uc_bar);
+
+    // PRE-BARRIER: block 0 does cross-GPU sync
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        nvls_barrier.sync(cuda::memory_order_relaxed);
+        nvls_barrier.commit();
+    }
+
+    // Lightweight 4-block barrier using embedded grid_barrier
+    grid_barrier_sync(uc_ctrl, 4);
+
+    // KERNEL EXECUTION (pointer-based loop for minimal address math)
+    size_t    tid     = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
+    uint32_t *src_ptr = base_u32 + offset + tid;
+    uint32_t *src_end = base_u32 + offset + count;
+    uint32_t *dst_ptr = dst_u32 + tid;
+    size_t    stride  = blockDim.x * 4 * 4; // 4 CTAs × blockDim.x × 4
+
+    for (; src_ptr < src_end; src_ptr += stride, dst_ptr += stride) {
+        uint4 val;
+        NvlsOps::ld(val, src_ptr);
+        reinterpret_cast<uint4 *>(dst_ptr)[0] = val;
+    }
+    // Sense-reversing barrier auto-resets, no manual reset needed
+}
+
+// Multi-CTA kernel using cooperative groups (for larger SM counts)
 template <typename NvlsOps>
 __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     reduce_scatter_kernel_vec32(
@@ -35,15 +73,17 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     }
     grid.sync(); // release all blocks on this GPU
 
-    // KERNEL EXECUTION
-    uint32_t *src_ptr = base_u32 + offset;
-    size_t    stride  = blockDim.x * gridDim.x * 4;
+    // KERNEL EXECUTION (pointer-based loop for minimal address math)
     size_t    tid     = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
+    uint32_t *src_ptr = base_u32 + offset + tid;
+    uint32_t *src_end = base_u32 + offset + count;
+    uint32_t *dst_ptr = dst_u32 + tid;
+    size_t    stride  = blockDim.x * gridDim.x * 4;
 
-    for (size_t idx = tid; idx < count; idx += stride) {
+    for (; src_ptr < src_end; src_ptr += stride, dst_ptr += stride) {
         uint4 val;
-        NvlsOps::ld(val, src_ptr + idx);
-        reinterpret_cast<uint4 *>(dst_u32 + idx)[0] = val;
+        NvlsOps::ld(val, src_ptr);
+        reinterpret_cast<uint4 *>(dst_ptr)[0] = val;
     }
 }
 
@@ -51,6 +91,9 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
 extern "C" {
 #endif
 
+// Unified reduce_scatter kernel launcher
+// - sm_count == 4: uses lightweight 4-CTA kernel with cudaLaunchKernelExC
+// - sm_count > 4:  uses cooperative kernel with grid.sync()
 ucc_status_t post_reduce_scatter_kernel(
     cudaStream_t stream, uint32_t sm_count, uint32_t threads,
     CUdeviceptr dst_ptr, CUdeviceptr mc_base_addr, CUdeviceptr mc_control_addr,
@@ -80,28 +123,57 @@ ucc_status_t post_reduce_scatter_kernel(
     void *kernel_args[] = {
         &mc_bar, &uc_bar, &base_u32, &offset, &count, &dst_u32, &tsize};
 
-    switch (datatype) {
-    case UCC_DT_FLOAT32:
-        cuda_st = cudaLaunchCooperativeKernel(
-            (void *)reduce_scatter_kernel_vec32<NvlsFp32Ops>,
-            dim3(sm_count),
-            dim3(threads),
-            kernel_args,
-            0,
-            stream);
-        break;
-    case UCC_DT_BFLOAT16:
-        cuda_st = cudaLaunchCooperativeKernel(
-            (void *)reduce_scatter_kernel_vec32<NvlsBf16Ops>,
-            dim3(sm_count),
-            dim3(threads),
-            kernel_args,
-            0,
-            stream);
-        break;
-    default:
-        return UCC_ERR_NOT_SUPPORTED;
+    if (sm_count == 4) {
+        // Use lightweight 4-CTA kernel with cudaLaunchKernelExC
+        // Grid barrier is embedded in uc_bar->grid_barrier
+        cudaLaunchConfig_t config = {};
+        config.gridDim            = dim3(4);
+        config.blockDim           = dim3(threads);
+        config.dynamicSmemBytes   = 0;
+        config.stream             = stream;
+
+        switch (datatype) {
+        case UCC_DT_FLOAT32:
+            cuda_st = cudaLaunchKernelExC(
+                &config,
+                (void *)reduce_scatter_kernel_4cta<NvlsFp32Ops>,
+                kernel_args);
+            break;
+        case UCC_DT_BFLOAT16:
+            cuda_st = cudaLaunchKernelExC(
+                &config,
+                (void *)reduce_scatter_kernel_4cta<NvlsBf16Ops>,
+                kernel_args);
+            break;
+        default:
+            return UCC_ERR_NOT_SUPPORTED;
+        }
+    } else {
+        // Use cooperative kernel with grid.sync()
+        switch (datatype) {
+        case UCC_DT_FLOAT32:
+            cuda_st = cudaLaunchCooperativeKernel(
+                (void *)reduce_scatter_kernel_vec32<NvlsFp32Ops>,
+                dim3(sm_count),
+                dim3(threads),
+                kernel_args,
+                0,
+                stream);
+            break;
+        case UCC_DT_BFLOAT16:
+            cuda_st = cudaLaunchCooperativeKernel(
+                (void *)reduce_scatter_kernel_vec32<NvlsBf16Ops>,
+                dim3(sm_count),
+                dim3(threads),
+                kernel_args,
+                0,
+                stream);
+            break;
+        default:
+            return UCC_ERR_NOT_SUPPORTED;
+        }
     }
+
     if (cuda_st != cudaSuccess) {
         return cuda_error_to_ucc_status(cuda_st);
     }

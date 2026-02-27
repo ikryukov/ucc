@@ -16,6 +16,15 @@
 #include <sys/prctl.h>   // for prctl()
 #include <unistd.h>      // for close()
 
+/* RHEL 8 glibc headers (kernel 4.18) don't define pidfd syscall numbers */
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
+
 ucc_status_t ucc_tl_cuda_nvls_check_support(
     ucc_tl_cuda_lib_t *lib, int device, int is_multinode)
 {
@@ -459,21 +468,7 @@ ucc_status_t ucc_tl_cuda_nvls_init(
         // fall through
     case UCC_TL_CUDA_NVLS_STATE_ADD_DEVICE:
     {
-        // Add device to multicast object
-        status = CUDADRV_FUNC(
-            cuMulticastAddDevice(nvls->mc_handle, nvls->device));
-        if (status != UCC_OK) {
-            tl_error(
-                UCC_TL_TEAM_LIB(team), "failed to add device to multicast");
-            goto cleanup;
-        }
-        tl_debug(
-            UCC_TL_TEAM_LIB(team),
-            "RANK %d: added device %d to multicast\n",
-            UCC_TL_TEAM_RANK(team),
-            nvls->device);
-
-        // Allocate physical memory
+        // Allocate physical memory FIRST (before adding device)
         prop.type          = CU_MEM_ALLOCATION_TYPE_PINNED;
         prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
         prop.location.id   = nvls->device;
@@ -496,7 +491,7 @@ ucc_status_t ucc_tl_cuda_nvls_init(
         accessDesc.flags         = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
 
         // Reserve and map unicast virtual address space
-        status                   = CUDADRV_FUNC(
+        status = CUDADRV_FUNC(
             cuMemAddressReserve(&uc_va, mc_size, nvls->minGran, 0U, 0));
         if (status != UCC_OK) {
             tl_error(
@@ -517,9 +512,59 @@ ucc_status_t ucc_tl_cuda_nvls_init(
             goto cleanup;
         }
 
-        // Bind memory to multicast object
+        // Store uc_va early for potential cleanup
+        nvls->uc_va        = uc_va;
+        nvls->mc_memhandle = mem_handle;
+
+        // Allocate coll_ids array
+        nvls->coll_ids = (size_t *)ucc_malloc(
+            lib->cfg.max_concurrent * sizeof(size_t), "coll_ids");
+        if (!nvls->coll_ids) {
+            status = UCC_ERR_NO_MEMORY;
+            goto cleanup;
+        }
+        memset(nvls->coll_ids, 0, lib->cfg.max_concurrent * sizeof(size_t));
+
+        // Initialize control regions on uc_va BEFORE adding device to multicast.
+        // This is critical: cuMulticastBindAddr blocks until all devices are added,
+        // so by doing memset BEFORE cuMulticastAddDevice, we guarantee that when
+        // cuMulticastBindAddr unblocks, ALL ranks have initialized their control regions.
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "NVLS init: rank %d, uc_va %p, "
+                 "symm_size %zu, ctrl_size %d, max_concurrent %u",
+                 UCC_TL_TEAM_RANK(team), (void *)uc_va,
+                 lib->cfg.nvls_symmetric_size, NVLS_CONTROL_SIZE,
+                 lib->cfg.max_concurrent);
+        CUDA_CHECK(cudaMemset2D(
+            (void *)(uc_va + lib->cfg.nvls_symmetric_size),
+            lib->cfg.nvls_symmetric_size + NVLS_CONTROL_SIZE,
+            0,
+            NVLS_CONTROL_SIZE,
+            lib->cfg.max_concurrent));
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "NVLS init: rank %d, control regions initialized",
+                 UCC_TL_TEAM_RANK(team));
+
+        // NOW add device to multicast object
+        status = CUDADRV_FUNC(
+            cuMulticastAddDevice(nvls->mc_handle, nvls->device));
+        if (status != UCC_OK) {
+            tl_error(
+                UCC_TL_TEAM_LIB(team), "failed to add device to multicast");
+            goto cleanup;
+        }
+        tl_debug(
+            UCC_TL_TEAM_LIB(team),
+            "RANK %d: added device %d to multicast\n",
+            UCC_TL_TEAM_RANK(team),
+            nvls->device);
+
+        // Bind memory to multicast object.
+        // This BLOCKS until all devices have called cuMulticastAddDevice.
+        // Since we initialized control regions BEFORE cuMulticastAddDevice,
+        // when this returns, ALL ranks have completed their control region init.
         status = CUDADRV_FUNC(cuMulticastBindAddr(
-            nvls->mc_handle, 0 /*mcOffset*/, uc_va, mc_size, 0));
+            nvls->mc_handle, 0, uc_va, mc_size, 0));
         if (status != UCC_OK) {
             tl_error(
                 UCC_TL_TEAM_LIB(team), "failed to bind memory to multicast");
@@ -549,6 +594,10 @@ ucc_status_t ucc_tl_cuda_nvls_init(
             goto cleanup;
         }
 
+        // Store mc_va
+        nvls->mc_va     = mc_va;
+        nvls->mc_offset = 0;
+
         tl_debug(
             UCC_TL_TEAM_LIB(team),
             "Rank: %d symmetric memory is set: %p [%ld bytes]\n",
@@ -556,30 +605,66 @@ ucc_status_t ucc_tl_cuda_nvls_init(
             (void *)mc_va,
             mc_size);
 
-        // Store the handles for cleanup in team destroy
-        nvls->mc_va        = mc_va;
-        nvls->uc_va        = uc_va;
-        nvls->mc_memhandle = mem_handle;
-        nvls->mc_offset    = 0; // mcOffset;
-        nvls->coll_ids     = (size_t *)ucc_malloc(
-            lib->cfg.max_concurrent * sizeof(size_t), "coll_ids");
-        if (!nvls->coll_ids) {
-            status = UCC_ERR_NO_MEMORY;
+        team->state = UCC_TL_CUDA_NVLS_STATE_BARRIER;
+        // fall through
+    }
+    case UCC_TL_CUDA_NVLS_STATE_BARRIER:
+    {
+        // Final OOB barrier to ensure ALL ranks have completed their NVLS setup
+        // before any collective can use the team. Even though CUDA's 
+        // cuMulticastBindAddr/cuMemMap block until all devices are added,
+        // there may be additional async fabric setup that completes later.
+
+        // Allocate barrier buffer if not already done
+        if (nvls->barrier_data == NULL) {
+            nvls->barrier_data = (char *)ucc_malloc(
+                UCC_TL_TEAM_SIZE(team), "nvls_barrier");
+            if (!nvls->barrier_data) {
+                status = UCC_ERR_NO_MEMORY;
+                goto cleanup;
+            }
+            nvls->barrier_data[UCC_TL_TEAM_RANK(team)] = 1;
+        }
+
+        // Initiate barrier (implemented as allgather)
+        if (team->oob_req == NULL) {
+            status = team->oob.allgather(
+                &nvls->barrier_data[UCC_TL_TEAM_RANK(team)],
+                nvls->barrier_data,
+                1,
+                team->oob.coll_info,
+                &team->oob_req);
+            if (status != UCC_OK) {
+                tl_error(UCC_TL_TEAM_LIB(team),
+                         "failed to initiate NVLS barrier");
+                ucc_free(nvls->barrier_data);
+                nvls->barrier_data = NULL;
+                goto cleanup;
+            }
+        }
+
+        // Test barrier completion
+        status = team->oob.req_test(team->oob_req);
+        if (status > 0) {
+            return UCC_INPROGRESS;
+        }
+        if (status < 0) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "NVLS barrier failed");
+            ucc_free(nvls->barrier_data);
+            nvls->barrier_data = NULL;
             goto cleanup;
         }
-        // Initialize the coll_ids to 0
-        memset(nvls->coll_ids, 0, lib->cfg.max_concurrent * sizeof(size_t));
 
-        if (UCC_TL_TEAM_RANK(team) == 0) {
-            // root rank zero-initializes the control region for each task slot
-            CUDA_CHECK(cudaMemset2D(
-                (void *)(uc_va + lib->cfg.nvls_symmetric_size),
-                lib->cfg.nvls_symmetric_size + NVLS_CONTROL_SIZE,
-                0,
-                NVLS_CONTROL_SIZE,
-                lib->cfg.max_concurrent));
-        }
+        // Barrier complete - clean up
+        team->oob.req_free(team->oob_req);
+        team->oob_req = NULL;
+        ucc_free(nvls->barrier_data);
+        nvls->barrier_data = NULL;
 
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "NVLS init: rank %d, OOB barrier complete - team ready",
+                 UCC_TL_TEAM_RANK(team));
         break;
     }
     default:
@@ -593,6 +678,10 @@ cleanup:
     if (nvls->share_data) {
         ucc_free(nvls->share_data);
         nvls->share_data = NULL;
+    }
+    if (nvls->barrier_data) {
+        ucc_free(nvls->barrier_data);
+        nvls->barrier_data = NULL;
     }
 
     // Clean up CUDA resources - check local variables for partial allocations

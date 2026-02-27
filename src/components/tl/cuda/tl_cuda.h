@@ -32,9 +32,15 @@
 #define UCC_TL_CUDA_MAX_RING_CHUNKS 8
 
 #ifdef HAVE_NVLS
-#define UCC_TL_CUDA_MAX_NVLS_PEERS 144
-#define UCC_TL_CUDA_MAX_NVLS_SM_COUNT 32
-#define UCC_TL_CUDA_MAX_NVLS_THREADS 1024
+#define UCC_TL_CUDA_MAX_NVLS_PEERS       144
+#define UCC_TL_CUDA_MAX_NVLS_SM_COUNT   32
+#define UCC_TL_CUDA_MAX_NVLS_THREADS    1024
+/* Low-latency allreduce threshold (bytes) */
+#define UCC_TL_CUDA_NVLS_LL_THRESH      (64 * 1024)
+/* Ultra low-latency (no-loop) allreduce threshold (bytes) */
+#define UCC_TL_CUDA_NVLS_LL_SMALL_THRESH (16 * 1024)
+/* Small-message kernel threshold (uint32 count) for allgatherv */
+#define UCC_TL_CUDA_NVLS_SMALL_MSG_U32  4096
 
 #endif /* HAVE_NVLS */
 #define UCC_TL_CUDA_SUPPORTED_COLLS                                            \

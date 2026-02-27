@@ -19,7 +19,7 @@ ucc_status_t post_allgatherv_kernel(
     cudaStream_t stream, uint32_t sm_count, uint32_t threads,
     CUdeviceptr src_ptr, CUdeviceptr mc_base_addr, size_t my_offset,
     size_t my_count, CUdeviceptr mc_control_addr, CUdeviceptr uc_control_addr,
-    uint64_t launch_counter, uint32_t tsize);
+    uint32_t tsize);
 
 #ifdef __cplusplus
 }

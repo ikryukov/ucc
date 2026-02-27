@@ -9,15 +9,16 @@ NVCCFLAGS =                                      \
     -I${UCC_TOP_BUILDDIR}                        \
     -I${UCC_TOP_SRCDIR}/src                      \
     -I${UCC_TOP_BUILDDIR}/src                    \
-    --compiler-options -fno-rtti,-fno-exceptions
+    --compiler-options -fno-rtti,-fno-exceptions  \
+    -maxrregcount=64
 
 LINK = $(LIBTOOL) --mode=link $(CC) -o $@
 
 .cu.o:
-	$(NVCC) -c $< -o $@  $(NVCCFLAGS) $(NVCC_ARCH)
+	$(NVCC) -c $< -o $@  $(NVCCFLAGS) $(NVCC_ARCH_NVLS)
 
 .cu.lo:
-	/bin/bash $(top_srcdir)/cuda_lt.sh "$(LIBTOOL)" $@ $(NVCC) -c  $< $(NVCCFLAGS) $(NVCC_ARCH)
+	/bin/bash $(top_srcdir)/cuda_lt.sh "$(LIBTOOL)" $@ $(NVCC) -c  $< $(NVCCFLAGS) $(NVCC_ARCH_NVLS)
 
 comp_noinst = libucc_tl_cuda_kernels.la
 

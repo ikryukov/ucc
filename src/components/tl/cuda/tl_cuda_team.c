@@ -35,8 +35,14 @@ static uint64_t ucc_tl_cuda_get_supported_colls(const ucc_tl_cuda_team_t *team)
          UCC_COLL_TYPE_REDUCE_SCATTERV);
 
 #ifdef HAVE_NVLS
-    // With NVLS compiled in, ALLREDUCE may be supported via NVLS.
-    // For multi-node teams, advertise ONLY NVLS ALLREDUCE if supported;
+    // NVLS-based collectives supported for multi-node
+    uint64_t nvls_multinode_colls =
+        (UCC_COLL_TYPE_ALLREDUCE | UCC_COLL_TYPE_ALLGATHER |
+         UCC_COLL_TYPE_ALLGATHERV | UCC_COLL_TYPE_REDUCE_SCATTER |
+         UCC_COLL_TYPE_REDUCE_SCATTERV);
+
+    // With NVLS compiled in, check if NVLS is supported.
+    // For multi-node teams, advertise NVLS-based collectives if supported;
     // otherwise advertise nothing for TL/CUDA (prevent non-NVLS colls).
     // For single-node teams, advertise base TL/CUDA colls and add ALLREDUCE
     // only if NVLS is supported.
@@ -45,7 +51,7 @@ static uint64_t ucc_tl_cuda_get_supported_colls(const ucc_tl_cuda_team_t *team)
         0 /* device */,
         is_multinode);
     if (is_multinode) {
-        return (status == UCC_OK) ? UCC_COLL_TYPE_ALLREDUCE : 0;
+        return (status == UCC_OK) ? nvls_multinode_colls : 0;
     }
     return (status == UCC_OK) ? (base_tl_cuda_colls | UCC_COLL_TYPE_ALLREDUCE)
                               : base_tl_cuda_colls;

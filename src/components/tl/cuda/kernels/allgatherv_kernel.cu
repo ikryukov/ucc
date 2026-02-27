@@ -16,50 +16,138 @@ extern "C" {
 
 #include "nvls.cuh"
 
+namespace cg = cooperative_groups;
+
+// Small message kernel (≤16KB = 4096 uint32s): NO LOOP, bounds check only
+__global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
+    allgatherv_kernel_small(
+        ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
+        const uint32_t *src_u32, uint32_t *base_u32, size_t my_offset,
+        size_t my_count, uint32_t tsize)
+{
+    NvlsBar nvls_barrier(tsize, mc_bar, uc_bar);
+
+    size_t idx = threadIdx.x * 4;
+    if (idx < my_count) {
+        uint4 val = *reinterpret_cast<const uint4 *>(src_u32 + idx);
+        MULTIMEM_ST_U32(val, base_u32 + my_offset + idx);
+    }
+
+    // POST-BARRIER
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        nvls_barrier.sync(cuda::memory_order_release);
+        nvls_barrier.commit();
+    }
+}
+
+// Multi-block kernel: 1-4 SMs, no cooperative launch needed
+// Uses lightweight grid barrier for POST synchronization
+__global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
+    allgatherv_kernel_multiblock(
+        ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
+        const uint32_t *src_u32, uint32_t *base_u32, size_t my_offset,
+        size_t my_count, uint32_t tsize, uint32_t num_blocks)
+{
+    NvlsBar            nvls_barrier(tsize, mc_bar, uc_bar);
+    NvlsControlLayout *uc_ctrl = reinterpret_cast<NvlsControlLayout *>(uc_bar);
+
+    constexpr int    UNROLL    = 4;
+    size_t           tid       = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
+    const uint32_t  *src_ptr   = src_u32 + tid;
+    const uint32_t  *src_end   = src_u32 + my_count;
+    uint32_t     *dst_ptr   = base_u32 + my_offset + tid;
+    size_t           stride    = blockDim.x * num_blocks * 4;
+    size_t           stride_u  = stride * UNROLL;
+    const uint32_t  *end_align = src_end - stride * (UNROLL - 1);
+
+    uint4 val[UNROLL];
+    for (; src_ptr < end_align; src_ptr += stride_u, dst_ptr += stride_u) {
+#pragma unroll
+        for (int i = 0; i < UNROLL; i++) {
+            val[i] = *reinterpret_cast<const uint4 *>(src_ptr + i * stride);
+        }
+#pragma unroll
+        for (int i = 0; i < UNROLL; i++) {
+            MULTIMEM_ST_U32(val[i], dst_ptr + i * stride);
+        }
+    }
+
+    for (; src_ptr < src_end; src_ptr += stride, dst_ptr += stride) {
+        uint4 val = *reinterpret_cast<const uint4 *>(src_ptr);
+        MULTIMEM_ST_U32(val, dst_ptr);
+    }
+
+    grid_barrier_sync(uc_ctrl, num_blocks);
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        nvls_barrier.sync(cuda::memory_order_release);
+        nvls_barrier.commit();
+    }
+}
+
+// Multi-CTA kernel using cooperative groups (for larger SM counts)
 __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     allgatherv_kernel_vec32(
         ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
-        /* block count per gpu * num gpus in Multicast group */
-        const uint32_t total_blocks,
-        uint64_t launch_counter, uint32_t *src_u32, uint32_t *base_u32,
-        size_t my_offset, size_t my_count)
+        const uint32_t *src_u32, uint32_t *base_u32, size_t my_offset,
+        size_t my_count, uint32_t tsize)
 {
-    // Pre-barrier: ensure all ranks are ready before writing
-    nvls_bar(
-        &(mc_bar->arrival_counter),
-        &(uc_bar->arrival_counter),
-        total_blocks * (launch_counter * 2 + 1));
+    cg::grid_group     grid = cg::this_grid();
+    NvlsBar            nvls_barrier(tsize, mc_bar, uc_bar);
 
-    // Each rank copies its data to NVLS mc buffer at its specific offset using multimem store
-    // Datatype agnostic - just copy raw data as uint4 vectors (16 bytes at a time)
-    size_t thread_offset = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    size_t stride        = blockDim.x * gridDim.x * 4;
+    constexpr int      UNROLL    = 4;
+    size_t             tid       = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
+    const uint32_t    *src_ptr   = src_u32 + tid;
+    const uint32_t    *src_end   = src_u32 + my_count;
+    uint32_t          *dst_ptr   = base_u32 + my_offset + tid;
+    size_t             stride    = blockDim.x * gridDim.x * 4;
+    size_t             stride_u  = stride * UNROLL;
+    const uint32_t    *end_align = src_end - stride * (UNROLL - 1);
 
-    for (size_t idx = thread_offset; idx < my_count; idx += stride) {
-        // Read 4 uint32_t values (16 bytes) from source
-        uint4     val = reinterpret_cast<uint4 *>(src_u32)[idx / 4];
-        // Write to destination at my_offset using multimem store (datatype agnostic)
-        uint32_t *dst = base_u32 + my_offset + idx;
-        MULTIMEM_ST_U32(val, dst);
+    uint4 val[UNROLL];
+    for (; src_ptr < end_align; src_ptr += stride_u, dst_ptr += stride_u) {
+#pragma unroll
+        for (int i = 0; i < UNROLL; i++) {
+            val[i] = *reinterpret_cast<const uint4 *>(src_ptr + i * stride);
+        }
+#pragma unroll
+        for (int i = 0; i < UNROLL; i++) {
+            MULTIMEM_ST_U32(val[i], dst_ptr + i * stride);
+        }
     }
 
-    // Post-barrier: ensure all ranks have completed writing before reading
-    nvls_bar(
-        &(mc_bar->arrival_counter),
-        &(uc_bar->arrival_counter),
-        total_blocks * (launch_counter * 2 + 2));
+    for (; src_ptr < src_end; src_ptr += stride, dst_ptr += stride) {
+        uint4 val = *reinterpret_cast<const uint4 *>(src_ptr);
+        MULTIMEM_ST_U32(val, dst_ptr);
+    }
+
+    grid.sync();
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        nvls_barrier.sync(cuda::memory_order_release);
+        nvls_barrier.commit();
+    }
 }
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+// Unified allgatherv kernel launcher
+// - my_count <= 4096 (≤16KB): small kernel (no loop, 1 block)
+// - sm_count <= 4: multiblock kernel (lightweight grid barrier)
+// - sm_count > 4: cooperative kernel with grid.sync()
 ucc_status_t post_allgatherv_kernel(
     cudaStream_t stream, uint32_t sm_count, uint32_t threads,
     CUdeviceptr src_ptr, CUdeviceptr mc_base_addr, size_t my_offset,
     size_t my_count, CUdeviceptr mc_control_addr, CUdeviceptr uc_control_addr,
-    uint64_t launch_counter, uint32_t tsize)
+    uint32_t tsize)
 {
+    ucc_tl_cuda_nvls_control_t *mc_bar;
+    ucc_tl_cuda_nvls_control_t *uc_bar;
+    const uint32_t             *src_u32;
+    uint32_t                   *base_u32;
+    cudaError_t                 cuda_st;
+
     ucc_assert(sm_count > 0 && sm_count <= UCC_TL_CUDA_MAX_NVLS_SM_COUNT);
     ucc_assert(threads > 0 && threads <= UCC_TL_CUDA_MAX_NVLS_THREADS);
 
@@ -70,28 +158,71 @@ ucc_status_t post_allgatherv_kernel(
     ucc_assert(mc_control_addr % 16 == 0);
     ucc_assert(src_ptr % 16 == 0);
 
-    uint32_t *src_u32  = reinterpret_cast<uint32_t *>(src_ptr);
-    uint32_t *base_u32 = reinterpret_cast<uint32_t *>(mc_base_addr);
-    ucc_tl_cuda_nvls_control_t
-        *mc_bar = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(
-            mc_control_addr);
-    ucc_tl_cuda_nvls_control_t
-        *uc_bar = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(
-            uc_control_addr);
-    /* total num of blocks in the multicast group, used for barrier sync */
-    uint32_t expected_blocks = sm_count * tsize;
+    src_u32  = reinterpret_cast<const uint32_t *>(src_ptr);
+    base_u32 = reinterpret_cast<uint32_t *>(mc_base_addr);
+    mc_bar   = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(mc_control_addr);
+    uc_bar   = reinterpret_cast<ucc_tl_cuda_nvls_control_t *>(uc_control_addr);
 
-    allgatherv_kernel_vec32<<<sm_count, threads, 0, stream>>>(
-        mc_bar,
-        uc_bar,
-        expected_blocks,
-        launch_counter,
-        src_u32,
-        base_u32,
-        my_offset,
-        my_count);
+    // Kernel selection:
+    // - ≤16KB (4096 uint32s): small kernel (no loop, 1 block)
+    // - 1-4 SMs: multiblock kernel (lightweight grid barrier)
+    // - >4 SMs: cooperative kernel with grid.sync()
 
-    CUDA_CHECK(cudaGetLastError());
+    cudaLaunchConfig_t config = {};
+    config.blockDim           = dim3(threads);
+    config.dynamicSmemBytes   = 0;
+    config.stream             = stream;
+
+    if (my_count <= UCC_TL_CUDA_NVLS_SMALL_MSG_U32) {
+        // ≤16KB: small kernel with no loop
+        void *kernel_args[] = {
+            &mc_bar, &uc_bar, &src_u32, &base_u32, &my_offset, &my_count,
+            &tsize};
+        config.gridDim = dim3(1);
+        cuda_st = cudaLaunchKernelExC(
+            &config, (void *)allgatherv_kernel_small, kernel_args);
+    } else if (sm_count <= 4) {
+        // 1-4 SMs: multiblock kernel with lightweight barrier
+        cudaLaunchAttribute attrs[1];
+        attrs[0].id               = cudaLaunchAttributeClusterDimension;
+        attrs[0].val.clusterDim.x = sm_count;
+        attrs[0].val.clusterDim.y = 1;
+        attrs[0].val.clusterDim.z = 1;
+        config.attrs    = attrs;
+        config.numAttrs = 1;
+
+        void *kernel_args[] = {
+            &mc_bar, &uc_bar, &src_u32, &base_u32, &my_offset, &my_count,
+            &tsize, &sm_count};
+        config.gridDim = dim3(sm_count);
+        cuda_st = cudaLaunchKernelExC(
+            &config, (void *)allgatherv_kernel_multiblock, kernel_args);
+    } else {
+        // >4 SMs: cooperative kernel with grid.sync()
+        uint32_t cluster_size = min(8u, sm_count);
+        sm_count = (sm_count / cluster_size) * cluster_size;
+
+        cudaLaunchAttribute attrs[2];
+        attrs[0].id               = cudaLaunchAttributeClusterDimension;
+        attrs[0].val.clusterDim.x = cluster_size;
+        attrs[0].val.clusterDim.y = 1;
+        attrs[0].val.clusterDim.z = 1;
+        attrs[1].id               = cudaLaunchAttributeCooperative;
+        attrs[1].val.cooperative  = 1;
+        config.attrs    = attrs;
+        config.numAttrs = 2;
+
+        void *kernel_args[] = {
+            &mc_bar, &uc_bar, &src_u32, &base_u32, &my_offset, &my_count,
+            &tsize};
+        config.gridDim = dim3(sm_count);
+        cuda_st = cudaLaunchKernelExC(
+            &config, (void *)allgatherv_kernel_vec32, kernel_args);
+    }
+
+    if (cuda_st != cudaSuccess) {
+        return cuda_error_to_ucc_status(cuda_st);
+    }
 
     return UCC_OK;
 }

@@ -166,7 +166,8 @@ ucc_status_t ucc_tl_cuda_task_init(ucc_base_coll_args_t *coll_args,
     } else {
         task->seq_num = team->seq_num++;
         task->coll_id = task->seq_num % max_concurrent;
-        task->bar     = TASK_BAR(task);
+        /* For multi-node NVLS teams, bar is not initialized (team->bar is NULL) */
+        task->bar     = (team->bar != NULL) ? TASK_BAR(task) : NULL;
     }
 
     *task_h = task;

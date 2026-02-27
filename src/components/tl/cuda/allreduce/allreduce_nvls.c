@@ -77,46 +77,69 @@ void ucc_tl_cuda_allreduce_nvls_progress(ucc_coll_task_t *coll_task)
 
     switch (task->allreduce_nvls.stage) {
     case STAGE_KERNEL:
-        /* Copy the user source into the symmetric buffer. */
-        status = CUDA_FUNC(cudaMemcpyAsync(
-            (void *)uc_va,
-            task->allreduce_nvls.sbuf,
-            task->allreduce_nvls.buf_size_bytes,
-            cudaMemcpyDeviceToDevice,
-            stream));
-        if (status != UCC_OK) {
-            task->super.status = status;
-            return;
-        }
-
-        status = post_allreduce_kernel(
-            stream,
-            sm_count,
-            threads,
-            mc_va,
-            task->allreduce_nvls.kernel_size_bytes,
-            TASK_NVLS_CONTROL_MC(task),
-            TASK_NVLS_CONTROL_UC(task),
-            task->allreduce_nvls.coll_id,
-            trank,
-            UCC_TL_TEAM_SIZE(team),
-            dt);
-        if (status != UCC_OK) {
-            tl_error(UCC_TASK_LIB(task), "failed to post allreduce kernel");
-            task->super.status = status;
-            return;
-        }
-        /* Copy back only the user data range; padding stays in the
-         * symmetric buffer and is overwritten on the next collective. */
-        status = CUDA_FUNC(cudaMemcpyAsync(
-            (void *)task->allreduce_nvls.rbuf,
-            (void *)uc_va,
-            task->allreduce_nvls.buf_size_bytes,
-            cudaMemcpyDeviceToDevice,
-            stream));
-        if (status != UCC_OK) {
-            task->super.status = status;
-            return;
+        if (task->allreduce_nvls.buf_size_bytes <= UCC_TL_CUDA_NVLS_LL_THRESH) {
+            /* Small messages: latency-optimized path (in-kernel copy +
+             * multicast reduce, no host-side staging copies). */
+            status = post_allreduce_lowlatency_kernel(
+                stream,
+                threads,
+                (CUdeviceptr)task->allreduce_nvls.sbuf,
+                (CUdeviceptr)task->allreduce_nvls.rbuf,
+                mc_va,
+                uc_va,
+                task->allreduce_nvls.buf_size_bytes,
+                TASK_NVLS_CONTROL_MC(task),
+                TASK_NVLS_CONTROL_UC(task),
+                UCC_TL_TEAM_SIZE(team),
+                dt);
+            if (status != UCC_OK) {
+                tl_error(UCC_TASK_LIB(task),
+                         "failed to post allreduce lowlatency kernel");
+                task->super.status = status;
+                return;
+            }
+        } else {
+            /* Copy the user source into the symmetric buffer. */
+            status = CUDA_FUNC(cudaMemcpyAsync(
+                (void *)uc_va,
+                task->allreduce_nvls.sbuf,
+                task->allreduce_nvls.buf_size_bytes,
+                cudaMemcpyDeviceToDevice,
+                stream));
+            if (status != UCC_OK) {
+                task->super.status = status;
+                return;
+            }
+            /* kernel_size_bytes is padded to 16*tsize so per-rank chunks are
+             * 16-byte aligned for the MULTIMEM v4 accesses; padding is never
+             * copied back to the user buffer. */
+            status = post_allreduce_kernel(
+                stream,
+                sm_count,
+                threads,
+                mc_va,
+                task->allreduce_nvls.kernel_size_bytes,
+                TASK_NVLS_CONTROL_MC(task),
+                TASK_NVLS_CONTROL_UC(task),
+                trank,
+                UCC_TL_TEAM_SIZE(team),
+                dt);
+            if (status != UCC_OK) {
+                tl_error(UCC_TASK_LIB(task), "failed to post allreduce kernel");
+                task->super.status = status;
+                return;
+            }
+            /* Copy back only the user data range. */
+            status = CUDA_FUNC(cudaMemcpyAsync(
+                (void *)task->allreduce_nvls.rbuf,
+                (void *)uc_va,
+                task->allreduce_nvls.buf_size_bytes,
+                cudaMemcpyDeviceToDevice,
+                stream));
+            if (status != UCC_OK) {
+                task->super.status = status;
+                return;
+            }
         }
         status = CUDA_FUNC(cudaEventRecord(evt, stream));
         if (status != UCC_OK) {
@@ -241,12 +264,8 @@ ucc_status_t ucc_tl_cuda_allreduce_nvls_init(
     task->super.progress         = ucc_tl_cuda_allreduce_nvls_progress;
     task->super.finalize         = ucc_tl_cuda_allreduce_nvls_finalize;
 
-    task->bar                    = TASK_BAR(task);
-
     task->allreduce_nvls.uc_va   = (CUdeviceptr)TASK_SYMMETRIC_UC(task);
     task->allreduce_nvls.mc_va   = (CUdeviceptr)TASK_SYMMETRIC_MC(task);
-
-    task->allreduce_nvls.coll_id = team->nvls.coll_ids[task->coll_id]++;
 
     *task_p                      = &task->super;
     return UCC_OK;

@@ -65,6 +65,14 @@ ucc_status_t ucc_tl_cuda_reduce_scatterv_nvls_start(ucc_coll_task_t *coll_task)
         }
     }
 
+    tl_debug(UCC_TASK_LIB(task),
+             "reduce_scatter_nvls_start: rank %d, seq_num %u, coll_id %u, "
+             "mc_ctrl %p, uc_ctrl %p, tsize %d",
+             UCC_TL_TEAM_RANK(team), task->seq_num, task->coll_id,
+             (void *)TASK_NVLS_CONTROL_MC(task),
+             (void *)TASK_NVLS_CONTROL_UC(task),
+             UCC_TL_TEAM_SIZE(team));
+
     /* copy src buffer to symmetric memory first */
     status = CUDA_FUNC(cudaMemcpyAsync(
         (void *)uc_va, sbuf, src_size_bytes, cudaMemcpyDeviceToDevice, stream));
@@ -80,7 +88,6 @@ ucc_status_t ucc_tl_cuda_reduce_scatterv_nvls_start(ucc_coll_task_t *coll_task)
         mc_va,
         TASK_NVLS_CONTROL_MC(task),
         TASK_NVLS_CONTROL_UC(task),
-        task->reduce_scatterv_nvls.coll_id,
         task->reduce_scatterv_nvls.offset,
         task->reduce_scatterv_nvls.count,
         dt,

@@ -41,6 +41,7 @@ typedef enum {
     UCC_TL_CUDA_NVLS_STATE_IMPORT_HANDLE,
     UCC_TL_CUDA_NVLS_STATE_SYNC_STATUS,
     UCC_TL_CUDA_NVLS_STATE_ADD_DEVICE,
+    /* Final OOB barrier to sync all ranks */
     UCC_TL_CUDA_NVLS_STATE_BARRIER,
 } ucc_tl_cuda_nvls_state_t;
 
@@ -90,7 +91,12 @@ typedef struct ucc_tl_cuda_nvls {
 } ucc_tl_cuda_nvls_t;
 
 typedef struct ucc_tl_cuda_nvls_control {
-    uint64_t arrival_counter;
+    uint32_t base;
+    uint32_t counter;
+    /* lightweight grid sync for 4-CTA kernels */
+    uint32_t grid_barrier;
+    /* padding for 16-byte alignment */
+    uint32_t _pad;
 } ucc_tl_cuda_nvls_control_t;
 
 ucc_status_t ucc_tl_cuda_nvls_check_support(

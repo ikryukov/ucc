@@ -17,8 +17,8 @@ extern "C" {
 ucc_status_t post_reduce_scatter_kernel(
     cudaStream_t stream, uint32_t sm_count, uint32_t threads,
     CUdeviceptr dst_ptr, CUdeviceptr mc_base_addr, CUdeviceptr mc_control_addr,
-    CUdeviceptr uc_control_addr, uint64_t launch_counter, size_t offset,
-    size_t count, ucc_datatype_t datatype, uint32_t tsize);
+    CUdeviceptr uc_control_addr, size_t offset, size_t count,
+    ucc_datatype_t datatype, uint32_t tsize);
 #ifdef __cplusplus
 }
 #endif

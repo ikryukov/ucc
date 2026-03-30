@@ -125,6 +125,11 @@ static inline ucc_tl_ucp_task_t *ucc_tl_ucp_init_task(ucc_base_coll_args_t *coll
     (((_task)->tagged.send_posted == (_task)->tagged.send_completed) &&        \
      ((_task)->tagged.recv_posted == (_task)->tagged.recv_completed))
 
+/* True when a send/recv completion callback reported an error
+   (status was changed from UCC_INPROGRESS to a negative value). */
+#define UCC_TL_UCP_TASK_P2P_ERR(_task)                                        \
+    ((_task)->super.status < 0)
+
 static inline ucc_status_t ucc_tl_ucp_test(ucc_tl_ucp_task_t *task)
 {
     int polls = 0;

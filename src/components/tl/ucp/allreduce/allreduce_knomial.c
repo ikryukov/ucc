@@ -72,6 +72,9 @@ UCC_KN_PHASE_EXTRA:
             SAVE_STATE(UCC_KN_PHASE_EXTRA);
             return;
         }
+        if (UCC_TL_UCP_TASK_P2P_ERR(task)) {
+            goto out;
+        }
         if (KN_NODE_EXTRA == node_type) {
             goto completion;
         } else {
@@ -127,6 +130,9 @@ UCC_KN_PHASE_EXTRA_REDUCE:
             SAVE_STATE(UCC_KN_PHASE_LOOP);
             return;
         }
+        if (UCC_TL_UCP_TASK_P2P_ERR(task)) {
+            goto out;
+        }
 
         if (task->tagged.send_posted > p->iteration * (radix - 1)) {
             if ((ucc_knomial_pattern_loop_first_iteration(p)) &&
@@ -176,8 +182,11 @@ UCC_KN_PHASE_PROXY:
     }
 
 completion:
-    ucc_assert(UCC_TL_UCP_TASK_P2P_COMPLETE(task));
-    task->super.status = UCC_OK;
+    ucc_assert(UCC_TL_UCP_TASK_P2P_COMPLETE(task) ||
+               UCC_TL_UCP_TASK_P2P_ERR(task));
+    if (!UCC_TL_UCP_TASK_P2P_ERR(task)) {
+        task->super.status = UCC_OK;
+    }
     UCC_TL_UCP_PROFILE_REQUEST_EVENT(coll_task, "ucp_allreduce_kn_done", 0);
 UCC_KN_PHASE_COMPLETE: /* unused label */
 out:

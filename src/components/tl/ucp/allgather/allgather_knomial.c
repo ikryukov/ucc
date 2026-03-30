@@ -143,6 +143,9 @@ UCC_KN_PHASE_EXTRA:
             SAVE_STATE(UCC_KN_PHASE_EXTRA);
             return;
         }
+        if (UCC_TL_UCP_TASK_P2P_ERR(task)) {
+            goto out;
+        }
         if (KN_NODE_EXTRA == node_type) {
             goto out;
         }
@@ -197,6 +200,9 @@ UCC_KN_PHASE_EXTRA:
             SAVE_STATE(UCC_KN_PHASE_LOOP);
             return;
         }
+        if (UCC_TL_UCP_TASK_P2P_ERR(task)) {
+            goto out;
+        }
         ucc_kn_ag_pattern_next_iter(p);
     }
 
@@ -215,8 +221,11 @@ UCC_KN_PHASE_PROXY:
     }
 
 out:
-    ucc_assert(UCC_TL_UCP_TASK_P2P_COMPLETE(task));
-    task->super.status = UCC_OK;
+    ucc_assert(UCC_TL_UCP_TASK_P2P_COMPLETE(task) ||
+               UCC_TL_UCP_TASK_P2P_ERR(task));
+    if (!UCC_TL_UCP_TASK_P2P_ERR(task)) {
+        task->super.status = UCC_OK;
+    }
     UCC_TL_UCP_PROFILE_REQUEST_EVENT(coll_task, "ucp_allgather_kn_done", 0);
 }
 

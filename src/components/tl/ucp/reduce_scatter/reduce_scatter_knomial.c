@@ -272,6 +272,9 @@ UCC_KN_PHASE_EXTRA:
             SAVE_STATE(UCC_KN_PHASE_EXTRA);
             return;
         }
+        if (UCC_TL_UCP_TASK_P2P_ERR(task)) {
+            goto out;
+        }
         if (KN_NODE_EXTRA == node_type) {
             goto out;
         }
@@ -321,6 +324,9 @@ UCC_KN_PHASE_LOOP:
         if (UCC_INPROGRESS == ucc_tl_ucp_test(task)) {
             SAVE_STATE(UCC_KN_PHASE_LOOP);
             return;
+        }
+        if (UCC_TL_UCP_TASK_P2P_ERR(task)) {
+            goto out;
         }
         if (task->tagged.send_posted > p->iteration * (radix - 1)) {
             step_radix      = ucc_kn_compute_step_radix(p);
@@ -379,7 +385,9 @@ UCC_KN_PHASE_PROXY:
 out:
     UCC_TL_UCP_PROFILE_REQUEST_EVENT(coll_task, "ucp_reduce_scatter_kn_done",
                                      0);
-    task->super.status = UCC_OK;
+    if (!UCC_TL_UCP_TASK_P2P_ERR(task)) {
+        task->super.status = UCC_OK;
+    }
 }
 
 ucc_status_t ucc_tl_ucp_reduce_scatter_knomial_start(ucc_coll_task_t *coll_task)

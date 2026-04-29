@@ -333,10 +333,10 @@ int ucc_topo_is_nvlink_fully_connected(
  *        NVLink fabric domain (required for multinode NVLS/NVLink-SHARP).
  *
  * Iterates all ranks in topo->set and verifies that every rank has
- * UCC_GPU_CAP_FABRIC set and an identical valid fabric_clique_id.
- * A fabric_clique_id of UCC_GPU_FABRIC_CLIQUE_ID_INVALID is treated as
- * "unknown / not populated" and
- * causes the function to return 0 immediately.
+ * UCC_GPU_CAP_FABRIC set, a matching non-all-zero fabric_cluster_uuid,
+ * and identical valid fabric_clique_id. A fabric_clique_id of
+ * UCC_GPU_FABRIC_CLIQUE_ID_INVALID is treated as "unknown / not populated"
+ * and causes the function to return 0 immediately.
  *
  * @param [in] topo   Pointer to the topology structure.
  *

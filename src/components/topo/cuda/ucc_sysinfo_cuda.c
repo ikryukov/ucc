@@ -490,6 +490,8 @@ static ucc_status_t ucc_sysinfo_cuda_get_info(void **info, int *n_info)
         gpu_info->gpus[i].caps                = 0;
         gpu_info->gpus[i].fabric_clique_id    = UCC_GPU_FABRIC_CLIQUE_ID_INVALID;
         gpu_info->gpus[i].fabric_partition_id = UCC_GPU_FABRIC_PARTITION_ID_INVALID;
+        memset(gpu_info->gpus[i].fabric_cluster_uuid, 0,
+               UCC_GPU_FABRIC_CLUSTER_UUID_LEN);
 
         num_nvlinks = ucc_sysinfo_cuda_get_nvlink_count(nvml_dev);
         if (num_nvlinks > 0) {
@@ -523,13 +525,27 @@ static ucc_status_t ucc_sysinfo_cuda_get_info(void **info, int *n_info)
 #if defined(HAVE_NVML_GPU_FABRIC_INFO_V) && defined(HAVE_NVML_FABRIC_PARTITION_ID)
                 gpu_info->gpus[i].fabric_partition_id = fabric_info.partitionId;
 #endif
+                /* Globally-unique fabric id; needed for cross-node match. */
+                _Static_assert(sizeof(fabric_info.clusterUuid) ==
+                                   UCC_GPU_FABRIC_CLUSTER_UUID_LEN,
+                               "clusterUuid size mismatch");
+                memcpy(gpu_info->gpus[i].fabric_cluster_uuid,
+                       fabric_info.clusterUuid,
+                       UCC_GPU_FABRIC_CLUSTER_UUID_LEN);
             }
         }
 #endif
-        ucc_debug("GPU %d: caps=0x%x clique=%llu partition=%u",
-                  i, gpu_info->gpus[i].caps,
-                  (unsigned long long)gpu_info->gpus[i].fabric_clique_id,
-                  (unsigned)gpu_info->gpus[i].fabric_partition_id);
+        {
+            const uint8_t *u = gpu_info->gpus[i].fabric_cluster_uuid;
+            ucc_debug("GPU %d: caps=0x%x clique=%llu partition=%u "
+                      "cluster_uuid=%02x%02x%02x%02x-%02x%02x-%02x%02x-"
+                      "%02x%02x-%02x%02x%02x%02x%02x%02x",
+                      i, gpu_info->gpus[i].caps,
+                      (unsigned long long)gpu_info->gpus[i].fabric_clique_id,
+                      (unsigned)gpu_info->gpus[i].fabric_partition_id,
+                      u[0], u[1], u[2],  u[3],  u[4],  u[5],  u[6],  u[7],
+                      u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+        }
     }
 
     if (num_gpus > UCC_MAX_HOST_GPUS) {

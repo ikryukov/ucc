@@ -112,6 +112,13 @@ typedef struct ucc_tl_cuda_lib {
 UCC_CLASS_DECLARE(ucc_tl_cuda_lib_t, const ucc_base_lib_params_t *,
                   const ucc_base_config_t *);
 
+/* TL_CUDA context lazy-init state: PENDING when context_init ran without
+ * an active CUDA context; DONE once lazy_init has set up device/topo/mpool. */
+typedef enum {
+    UCC_TL_CUDA_CONTEXT_INIT_PENDING,
+    UCC_TL_CUDA_CONTEXT_INIT_DONE,
+} ucc_tl_cuda_context_init_state_t;
+
 typedef struct ucc_tl_cuda_context {
     ucc_tl_context_t             super;
     ucc_tl_cuda_context_config_t cfg;
@@ -120,9 +127,16 @@ typedef struct ucc_tl_cuda_context {
     ucc_tl_cuda_topo_t          *topo;
     ucc_mpool_t                  req_mp;
     tl_cuda_ep_hash_t           *ipc_cache;
+    /* Fields above are valid only when init_state == DONE. */
+    ucc_tl_cuda_context_init_state_t init_state;
+    ucc_thread_mode_t                init_thread_mode;
 } ucc_tl_cuda_context_t;
 UCC_CLASS_DECLARE(ucc_tl_cuda_context_t, const ucc_base_context_params_t *,
                   const ucc_base_config_t *);
+
+/* Run the deferred CUDA-side init if not done yet. Idempotent. Returns
+ * UCC_OK if ready, UCC_ERR_NO_RESOURCE if no active CUDA context. */
+ucc_status_t ucc_tl_cuda_context_ensure_ready(ucc_tl_cuda_context_t *ctx);
 
 typedef uint32_t ucc_tl_cuda_sync_state_t;
 

@@ -75,6 +75,14 @@ UCC_CLASS_INIT_FUNC(ucc_tl_cuda_team_t, ucc_base_context_t *tl_context,
     size_t ctrl_size, alloc_size, scratch_size;
     UCC_CLASS_CALL_SUPER_INIT(ucc_tl_team_t, &ctx->super, params);
 
+    /* Promote the context from PENDING to DONE now that we are forming a
+     * team and the application has had a chance to call cudaSetDevice. */
+    status = ucc_tl_cuda_context_ensure_ready(ctx);
+    if (status != UCC_OK) {
+        tl_debug(tl_context->lib, "TL_CUDA context not ready, team will fall back");
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
     self->oob         = params->params.oob;
     self->oob_req     = NULL;
     self->stream      = NULL;

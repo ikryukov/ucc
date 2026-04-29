@@ -11,34 +11,32 @@
 #include <cuda_runtime.h>
 #include <cuda.h>
 
-/**
- * Initialize CUDA transport layer context
- *
- * This function initializes a CUDA TL context which requires an active CUDA context.
- * It sets up memory pools for CUDA tasks and initializes the topology information.
- *
- * @param [in]  params      Base context initialization parameters
- * @param [in]  config      Configuration for CUDA context
- *
- * @return UCC_OK on success or error code on failure
- */
-UCC_CLASS_INIT_FUNC(ucc_tl_cuda_context_t,
-                    const ucc_base_context_params_t *params,
-                    const ucc_base_config_t *config)
+/* Lazy half of TL_CUDA context init: requires an active CUDA context.
+ * Idempotent. Returns NO_RESOURCE if no current CUDA context. */
+static ucc_status_t
+ucc_tl_cuda_context_lazy_init(ucc_tl_cuda_context_t *self)
 {
-    ucc_tl_cuda_context_config_t *tl_cuda_config =
-        ucc_derived_of(config, ucc_tl_cuda_context_config_t);
-    ucc_status_t       status;
-    ucc_tl_cuda_lib_t *lib;
+    ucc_tl_cuda_lib_t *lib =
+        ucc_derived_of(self->super.super.lib, ucc_tl_cuda_lib_t);
     int                num_devices;
     cudaError_t        cuda_st;
     CUcontext          cu_ctx;
     CUresult           cu_st;
+    ucc_status_t       status;
 
-    UCC_CLASS_CALL_SUPER_INIT(ucc_tl_context_t, &tl_cuda_config->super,
-                              params->context);
-    lib = ucc_derived_of(self->super.super.lib, ucc_tl_cuda_lib_t);
-    memcpy(&self->cfg, tl_cuda_config, sizeof(*tl_cuda_config));
+    if (self->init_state == UCC_TL_CUDA_CONTEXT_INIT_DONE) {
+        return UCC_OK;
+    }
+
+    /* Cheap, side-effect-free check first: cudaGetDeviceCount can
+     * lazy-initialize the runtime on device 0 and race the application's
+     * intended cudaSetDevice. */
+    cu_st = cuCtxGetCurrent(&cu_ctx);
+    if (cu_ctx == NULL || cu_st != CUDA_SUCCESS) {
+        tl_debug(self->super.super.lib,
+                 "no active CUDA context yet; deferring TL_CUDA init");
+        return UCC_ERR_NO_RESOURCE;
+    }
 
     cuda_st = cudaGetDeviceCount(&num_devices);
     if (cuda_st != cudaSuccess) {
@@ -51,16 +49,9 @@ UCC_CLASS_INIT_FUNC(ucc_tl_cuda_context_t,
         return UCC_ERR_NO_RESOURCE;
     }
 
-    cu_st = cuCtxGetCurrent(&cu_ctx);
-    if (cu_ctx == NULL || cu_st != CUDA_SUCCESS) {
-        tl_debug(self->super.super.lib,
-                 "cannot create CUDA TL context without active CUDA context");
-        return UCC_ERR_NO_RESOURCE;
-    }
-
     status = ucc_mpool_init(&self->req_mp, 0, sizeof(ucc_tl_cuda_task_t), 0,
                             UCC_CACHE_LINE_SIZE, 8, UINT_MAX,
-                            &ucc_coll_task_mpool_ops, params->thread_mode,
+                            &ucc_coll_task_mpool_ops, self->init_thread_mode,
                             "tl_cuda_req_mp");
     if (status != UCC_OK) {
         tl_error(self->super.super.lib,
@@ -102,11 +93,57 @@ UCC_CLASS_INIT_FUNC(ucc_tl_cuda_context_t,
     }
 
     self->ipc_cache = kh_init(tl_cuda_ep_hash);
+
+    self->init_state = UCC_TL_CUDA_CONTEXT_INIT_DONE;
     tl_debug(self->super.super.lib, "initialized tl context: %p", self);
     return UCC_OK;
 
 free_mpool:
     ucc_mpool_cleanup(&self->req_mp, 1);
+    return status;
+}
+
+ucc_status_t ucc_tl_cuda_context_ensure_ready(ucc_tl_cuda_context_t *ctx)
+{
+    return ucc_tl_cuda_context_lazy_init(ctx);
+}
+
+/**
+ * Initialize CUDA transport layer context
+ *
+ * This function initializes a CUDA TL context. It tries to do the full
+ * CUDA-side setup eagerly via lazy_init; if no active CUDA context yet,
+ * registers as PENDING and retries lazily from team_init.
+ *
+ * @param [in]  params      Base context initialization parameters
+ * @param [in]  config      Configuration for CUDA context
+ *
+ * @return UCC_OK on success or error code on failure
+ */
+UCC_CLASS_INIT_FUNC(ucc_tl_cuda_context_t,
+                    const ucc_base_context_params_t *params,
+                    const ucc_base_config_t *config)
+{
+    ucc_tl_cuda_context_config_t *tl_cuda_config =
+        ucc_derived_of(config, ucc_tl_cuda_context_config_t);
+    ucc_status_t status;
+
+    UCC_CLASS_CALL_SUPER_INIT(ucc_tl_context_t, &tl_cuda_config->super,
+                              params->context);
+    memcpy(&self->cfg, tl_cuda_config, sizeof(*tl_cuda_config));
+
+    self->init_state       = UCC_TL_CUDA_CONTEXT_INIT_PENDING;
+    self->init_thread_mode = params->thread_mode;
+    self->device           = -1;
+    self->topo             = NULL;
+    self->ipc_cache        = NULL;
+
+    status = ucc_tl_cuda_context_lazy_init(self);
+    if (status == UCC_OK || status == UCC_ERR_NO_RESOURCE) {
+        /* NO_RESOURCE means no active CUDA context yet; team_init will
+         * retry once the application has called cudaSetDevice. */
+        return UCC_OK;
+    }
     return status;
 }
 
@@ -145,23 +182,25 @@ UCC_CLASS_CLEANUP_FUNC(ucc_tl_cuda_context_t)
     ucc_tl_cuda_lib_t *lib =
         ucc_derived_of(self->super.super.lib, ucc_tl_cuda_lib_t);
 
-    // Log context finalization for debugging purposes
     tl_debug(self->super.super.lib, "finalizing tl context: %p", self);
 
-    // Clean up IPC cache if it exists
+    /* lazy_init never reached DONE — nothing was allocated. */
+    if (self->init_state != UCC_TL_CUDA_CONTEXT_INIT_DONE) {
+        return;
+    }
+
     if (self->ipc_cache != NULL) {
         kh_destroy(tl_cuda_ep_hash, self->ipc_cache);
         self->ipc_cache = NULL;
     }
 
-    // Only destroy topology if it's context-specific (not cached)
-    // For cached topology, it will be destroyed when the library is cleaned up
+    /* Only destroy per-context topology; lib-cached topology is freed at
+     * lib finalization. */
     if (self->topo != NULL && !lib->cfg.topo_cache_enable) {
         ucc_tl_cuda_topo_destroy(self->topo);
         self->topo = NULL;
     }
 
-    // Clean up the request memory pool with force leak check
     ucc_mpool_cleanup(&self->req_mp, 1);
 }
 

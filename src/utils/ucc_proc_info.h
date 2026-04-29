@@ -149,4 +149,13 @@ ucc_status_t ucc_local_proc_info_init();
 
 uint64_t ucc_get_system_id();
 
+/* Process-wide CUDA IPC handle cache owner registry. UCC TL_CUDA registers
+ * itself on context create; TL_UCP queries this to avoid loading UCX
+ * cuda_ipc (CUDA returns cudaErrorAlreadyMapped if both call
+ * cudaIpcOpenMemHandle on the same allocation). Atomic. Pair every
+ * register call with exactly one unregister. */
+void ucc_cuda_ipc_owner_register(void);
+void ucc_cuda_ipc_owner_unregister(void);
+int  ucc_cuda_ipc_owner_active(void);
+
 #endif

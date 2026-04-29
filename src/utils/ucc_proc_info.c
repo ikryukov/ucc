@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ucc_proc_info.h"
+#include "utils/ucc_atomic.h"
 #include "utils/ucc_malloc.h"
 #include "utils/ucc_math.h"
 #include "utils/ucc_sys.h"
@@ -23,6 +24,23 @@
 
 ucc_proc_info_t ucc_local_proc;
 ucc_host_info_t ucc_local_host;
+
+static volatile uint32_t ucc_cuda_ipc_owner_count;
+
+void ucc_cuda_ipc_owner_register(void)
+{
+    ucc_atomic_add32(&ucc_cuda_ipc_owner_count, 1);
+}
+
+void ucc_cuda_ipc_owner_unregister(void)
+{
+    ucc_atomic_sub32(&ucc_cuda_ipc_owner_count, 1);
+}
+
+int ucc_cuda_ipc_owner_active(void)
+{
+    return ucc_cuda_ipc_owner_count != 0;
+}
 
 uint64_t ucc_get_system_id()
 {

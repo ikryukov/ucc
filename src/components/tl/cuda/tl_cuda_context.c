@@ -7,6 +7,7 @@
 #include "tl_cuda.h"
 #include "utils/arch/cpu.h"
 #include "utils/arch/cuda_def.h"
+#include "utils/ucc_proc_info.h"
 #include <tl_cuda_topo.h>
 #include <cuda_runtime.h>
 #include <cuda.h>
@@ -102,6 +103,10 @@ UCC_CLASS_INIT_FUNC(ucc_tl_cuda_context_t,
     }
 
     self->ipc_cache = kh_init(tl_cuda_ep_hash);
+
+    /* Sibling TL_UCP contexts skip UCX cuda_ipc when this counter > 0. */
+    ucc_cuda_ipc_owner_register();
+
     tl_debug(self->super.super.lib, "initialized tl context: %p", self);
     return UCC_OK;
 
@@ -147,6 +152,8 @@ UCC_CLASS_CLEANUP_FUNC(ucc_tl_cuda_context_t)
 
     // Log context finalization for debugging purposes
     tl_debug(self->super.super.lib, "finalizing tl context: %p", self);
+
+    ucc_cuda_ipc_owner_unregister();
 
     // Clean up IPC cache if it exists
     if (self->ipc_cache != NULL) {

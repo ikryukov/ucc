@@ -9,6 +9,7 @@
 #include "tl_ucp_coll.h"
 #include "tl_ucp_ep.h"
 #include "utils/ucc_math.h"
+#include "utils/ucc_proc_info.h"
 #include "utils/ucc_string.h"
 #include "utils/arch/cpu.h"
 #include "schedule/ucc_schedule_pipelined.h"
@@ -16,6 +17,25 @@
 #include <limits.h>
 
 #include "tl_ucp_sendrecv.h"
+
+/* Returns 1 if any UCC TL_CUDA is (or will be) active in this process —
+ * either listed in this context's TLs or already registered via
+ * ucc_cuda_ipc_owner_active(). When that is the case, UCX cuda_ipc must
+ * be excluded from this UCP context to avoid a duplicate
+ * cudaIpcOpenMemHandle on the same source allocation. */
+static int
+ucc_tl_ucp_should_exclude_ucx_cuda_ipc(const ucc_context_t *context)
+{
+    const ucc_config_names_array_t *all_tls = &context->all_tls;
+    int                             i;
+
+    for (i = 0; i < all_tls->count; i++) {
+        if (strcmp(all_tls->names[i], "cuda") == 0) {
+            return 1;
+        }
+    }
+    return ucc_cuda_ipc_owner_active();
+}
 
 #define UCP_CHECK(function, msg, go, ctx)                                      \
     status = function;                                                         \
@@ -184,6 +204,17 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
                     "applications when CUDA kernel depends on collective "
                     "communication and stream is not provided to the collective");
         }
+    }
+
+    /* When UCC TL_CUDA is active in this process, drop UCX cuda_ipc to
+     * avoid duplicate cudaIpcOpenMemHandle calls on the same allocation
+     * (CUDA tracks mappings per allocation, second caller gets 208). */
+    if (ucc_tl_ucp_should_exclude_ucx_cuda_ipc(params->context)) {
+        UCP_CHECK(ucp_config_modify(ucp_config, "TLS", "^cuda_ipc"),
+                  "failed to exclude cuda_ipc from UCX TLS",
+                  err_cfg, self);
+        tl_info(self->super.super.lib,
+                "TL_CUDA active; excluded cuda_ipc from UCX TLS");
     }
 
     if (!ucc_config_names_array_is_all(&self->super.super.ucc_context->net_devices)) {

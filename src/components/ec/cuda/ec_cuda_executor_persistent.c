@@ -163,7 +163,19 @@ ucc_status_t ucc_cuda_executor_persistent_stop(ucc_ee_executor_t *executor)
                (*st != UCC_EC_CUDA_EXECUTOR_SHUTDOWN));
     *st = UCC_EC_CUDA_EXECUTOR_SHUTDOWN;
     eee->pidx = -1;
-    while(*st != UCC_EC_CUDA_EXECUTOR_SHUTDOWN_ACK) { }
+    /* state/pidx live in device-mapped (zero-copy) host memory shared with the
+     * persistent kernel. On weakly-ordered CPUs (e.g. aarch64/Grace) the
+     * inner-shareable CPU fences do not order against the GPU, so the kernel
+     * may never observe pidx == -1 and never acknowledge the shutdown, hanging
+     * here forever. Use the bus (outer-shareable) store fence, which is defined
+     * specifically to synchronize write-back and device-mapped memory, to
+     * publish the shutdown flag to the kernel. */
+    ucc_memory_bus_store_fence();
+    while (*st != UCC_EC_CUDA_EXECUTOR_SHUTDOWN_ACK) {
+        /* Ensure each poll re-reads the flag from device-mapped memory written
+         * by the GPU rather than a stale cached value. */
+        ucc_memory_bus_load_fence();
+    }
     eee->super.ee_context = NULL;
     eee->state = UCC_EC_CUDA_EXECUTOR_INITIALIZED;
 

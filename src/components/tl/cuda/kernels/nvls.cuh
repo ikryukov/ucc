@@ -209,68 +209,78 @@ struct NvlsBf16Ops {
     }
 };
 
+// Integer NVLS ops operate on a 128-bit uint4 chunk (like the fp32/bf16 ops)
+// so they plug into the same vectorized kernels. Stores are plain 128-bit
+// multicast bit-copies (MULTIMEM_ST); only ld_reduce needs the typed add.
+// ptxas rejects the vector qualifier on multimem.ld_reduce for integer types
+// (only float variants may be vectorized), so integers reduce one lane at a
+// time and pack the result into a uint4. Stores stay 128-bit bit-copies.
 struct NvlsInt32Ops {
-    using value_type = int;
-    __device__ static inline void ld(int &v, const uint32_t *ptr)
+    __device__ __forceinline__ static void ld(uint4 &v, const uint32_t *ptr)
     {
         asm("multimem.ld_reduce.global.add.s32 %0, [%1];"
-            : "=r"(v)
-            : "l"(ptr)
-            : "memory");
+            : "=r"(v.x) : "l"(ptr + 0) : "memory");
+        asm("multimem.ld_reduce.global.add.s32 %0, [%1];"
+            : "=r"(v.y) : "l"(ptr + 1) : "memory");
+        asm("multimem.ld_reduce.global.add.s32 %0, [%1];"
+            : "=r"(v.z) : "l"(ptr + 2) : "memory");
+        asm("multimem.ld_reduce.global.add.s32 %0, [%1];"
+            : "=r"(v.w) : "l"(ptr + 3) : "memory");
     }
-    __device__ static inline void st(const int &v, uint32_t *ptr)
+    __device__ __forceinline__ static void st(const uint4 &v, uint32_t *ptr)
     {
-        asm volatile("multimem.st.global.s32 [%0], %1;" ::"l"(ptr), "r"(v)
-                     : "memory");
+        MULTIMEM_ST(v, ptr);
     }
 };
 
 struct NvlsUint32Ops {
-    using value_type = unsigned int;
-    __device__ static inline void ld(unsigned int &v, const uint32_t *ptr)
+    __device__ __forceinline__ static void ld(uint4 &v, const uint32_t *ptr)
     {
         asm("multimem.ld_reduce.global.add.u32 %0, [%1];"
-            : "=r"(v)
-            : "l"(ptr)
-            : "memory");
+            : "=r"(v.x) : "l"(ptr + 0) : "memory");
+        asm("multimem.ld_reduce.global.add.u32 %0, [%1];"
+            : "=r"(v.y) : "l"(ptr + 1) : "memory");
+        asm("multimem.ld_reduce.global.add.u32 %0, [%1];"
+            : "=r"(v.z) : "l"(ptr + 2) : "memory");
+        asm("multimem.ld_reduce.global.add.u32 %0, [%1];"
+            : "=r"(v.w) : "l"(ptr + 3) : "memory");
     }
-    __device__ static inline void st(const unsigned int &v, uint32_t *ptr)
+    __device__ __forceinline__ static void st(const uint4 &v, uint32_t *ptr)
     {
-        asm volatile("multimem.st.global.u32 [%0], %1;" ::"l"(ptr), "r"(v)
-                     : "memory");
+        MULTIMEM_ST(v, ptr);
     }
 };
 
-// PTX does not support s64 with add operation, so we use u64 instead
+// PTX has no .s64 add for multimem, so 64-bit integers use .u64 add
+// (two's-complement addition is identical for signed and unsigned).
+// A uint4 holds two u64 lanes: {x,y} = lo, {z,w} = hi.
 struct NvlsInt64Ops {
-    using value_type = unsigned long long;
-    __device__ static inline void ld(unsigned long long &v, const uint64_t *ptr)
+    __device__ __forceinline__ static void ld(uint4 &v, const uint32_t *ptr)
     {
+        unsigned long long lo, hi;
         asm("multimem.ld_reduce.global.add.u64 %0, [%1];"
-            : "=l"(v)
-            : "l"(ptr)
-            : "memory");
+            : "=l"(lo) : "l"(ptr + 0) : "memory");
+        asm("multimem.ld_reduce.global.add.u64 %0, [%1];"
+            : "=l"(hi) : "l"(ptr + 2) : "memory");
+        v.x = (uint32_t)lo;
+        v.y = (uint32_t)(lo >> 32);
+        v.z = (uint32_t)hi;
+        v.w = (uint32_t)(hi >> 32);
     }
-    __device__ static inline void st(const unsigned long long &v, uint64_t *ptr)
+    __device__ __forceinline__ static void st(const uint4 &v, uint32_t *ptr)
     {
-        asm volatile("multimem.st.global.u64 [%0], %1;" ::"l"(ptr), "l"(v)
-                     : "memory");
+        MULTIMEM_ST(v, ptr);
     }
 };
 
 struct NvlsUint64Ops {
-    using value_type = unsigned long long;
-    __device__ static inline void ld(unsigned long long &v, const uint64_t *ptr)
+    __device__ __forceinline__ static void ld(uint4 &v, const uint32_t *ptr)
     {
-        asm("multimem.ld_reduce.global.add.u64 %0, [%1];"
-            : "=l"(v)
-            : "l"(ptr)
-            : "memory");
+        NvlsInt64Ops::ld(v, ptr);
     }
-    __device__ static inline void st(const unsigned long long &v, uint64_t *ptr)
+    __device__ __forceinline__ static void st(const uint4 &v, uint32_t *ptr)
     {
-        asm volatile("multimem.st.global.u64 [%0], %1;" ::"l"(ptr), "l"(v)
-                     : "memory");
+        MULTIMEM_ST(v, ptr);
     }
 };
 #endif // __cplusplus

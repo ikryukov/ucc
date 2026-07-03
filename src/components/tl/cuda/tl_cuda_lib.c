@@ -27,13 +27,8 @@ UCC_CLASS_INIT_FUNC(ucc_tl_cuda_lib_t, const ucc_base_lib_params_t *params,
         self->cfg.allgather_ring_num_chunks = UCC_TL_CUDA_MAX_RING_CHUNKS;
     }
 #ifdef HAVE_NVLS
-    if (self->cfg.nvls_sm_count < 1) {
-        tl_error(
-            &self->super,
-            "nvls_sm_count is too small, min is 1, please check NVLS_SM_COUNT "
-            "config parameter");
-        return UCC_ERR_INVALID_PARAM;
-    }
+    /* nvls_sm_count == 0 selects size-adaptive SM counts (see
+     * ucc_tl_cuda_nvls_sm_count); any non-zero value is an explicit override. */
     if (self->cfg.nvls_sm_count > UCC_TL_CUDA_MAX_NVLS_SM_COUNT) {
         tl_error(
             &self->super,

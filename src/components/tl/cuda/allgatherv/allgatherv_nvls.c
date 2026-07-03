@@ -65,6 +65,8 @@ ucc_status_t ucc_tl_cuda_allgatherv_nvls_start(ucc_coll_task_t *coll_task)
              UCC_TL_TEAM_SIZE(team));
 
     /* Each rank copies its data to the NVLS buffer at its specific offset */
+    sm_count = ucc_tl_cuda_nvls_sm_count(
+        task->allgatherv_nvls.total_count * sizeof(uint32_t), sm_count);
     status = post_allgatherv_kernel(
         stream,
         sm_count,

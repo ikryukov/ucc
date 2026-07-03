@@ -80,7 +80,8 @@ ucc_status_t ucc_tl_cuda_reduce_scatterv_nvls_start(ucc_coll_task_t *coll_task)
         return status;
     }
 
-    status = post_reduce_scatter_kernel(
+    sm_count = ucc_tl_cuda_nvls_sm_count(src_size_bytes, sm_count);
+    status   = post_reduce_scatter_kernel(
         stream,
         sm_count,
         threads,

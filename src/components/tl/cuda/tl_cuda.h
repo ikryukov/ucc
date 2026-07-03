@@ -42,6 +42,34 @@
 /* Small-message kernel threshold (uint32 count) for allgatherv */
 #define UCC_TL_CUDA_NVLS_SMALL_MSG_U32   4096
 
+/* Pick the number of SMs (thread blocks) for an NVLS collective.
+ * When cfg_sm_count != 0 the user value is honored; otherwise the count is
+ * chosen adaptively from the message size: small messages are latency-bound
+ * (1 SM is fastest), larger ones need more SMs to saturate NVLink bandwidth.
+ * Thresholds are empirically tuned on VR200 (see NVLS perf sweeps). */
+static inline uint32_t
+ucc_tl_cuda_nvls_sm_count(size_t msg_bytes, uint32_t cfg_sm_count)
+{
+    uint32_t sm;
+
+    if (cfg_sm_count != 0) {
+        return cfg_sm_count;
+    }
+    if (msg_bytes <= (1UL << 20)) {          /* <= 1 MB  */
+        sm = 1;
+    } else if (msg_bytes <= (8UL << 20)) {   /* <= 8 MB  */
+        sm = 8;
+    } else if (msg_bytes <= (32UL << 20)) {  /* <= 32 MB */
+        sm = 16;
+    } else {                                 /* >  32 MB */
+        sm = 32;
+    }
+    if (sm > UCC_TL_CUDA_MAX_NVLS_SM_COUNT) {
+        sm = UCC_TL_CUDA_MAX_NVLS_SM_COUNT;
+    }
+    return sm;
+}
+
 #endif /* HAVE_NVLS */
 #define UCC_TL_CUDA_SUPPORTED_COLLS                                            \
     (UCC_COLL_TYPE_ALLTOALL | UCC_COLL_TYPE_ALLTOALLV |                        \

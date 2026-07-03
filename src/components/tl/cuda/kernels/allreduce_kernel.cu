@@ -204,6 +204,40 @@ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
     }
 }
 
+// Launch helper: single-block vs grid-cooperative kernel, selected by sm_count.
+template <typename Ops>
+static cudaError_t launch_allreduce(uint32_t sm_count, uint32_t threads,
+                                    void **args, cudaStream_t stream)
+{
+    void *k = (sm_count == 1) ? (void *)allreduce_kernel_vec32_1sm<Ops>
+                              : (void *)allreduce_kernel_vec32<Ops>;
+    return cudaLaunchCooperativeKernel(k, dim3(sm_count), dim3(threads), args,
+                                       0, stream);
+}
+
+// Launch helper for the single-block low-latency path.
+template <typename Ops>
+static cudaError_t launch_allreduce_ll(bool small, uint32_t threads,
+                                       void **args, cudaStream_t stream)
+{
+    void *k = small ? (void *)allreduce_kernel_vec32_lowlatency_small<Ops>
+                    : (void *)allreduce_kernel_vec32_lowlatency<Ops>;
+    return cudaLaunchKernel(k, dim3(1), dim3(threads), args, 0, stream);
+}
+
+// Map ucc_datatype_t -> NvlsOps and invoke CALL(Ops). Keeps the dtype set
+// consistent across the standard and low-latency allreduce launchers.
+#define NVLS_AR_DT_DISPATCH(dt, CALL)                                          \
+    switch (dt) {                                                              \
+    case UCC_DT_FLOAT32:  CALL(NvlsFp32Ops);   break;                          \
+    case UCC_DT_BFLOAT16: CALL(NvlsBf16Ops);   break;                          \
+    case UCC_DT_INT32:    CALL(NvlsInt32Ops);  break;                          \
+    case UCC_DT_UINT32:   CALL(NvlsUint32Ops); break;                          \
+    case UCC_DT_INT64:    CALL(NvlsInt64Ops);  break;                          \
+    case UCC_DT_UINT64:   CALL(NvlsUint64Ops); break;                          \
+    default:              return UCC_ERR_NOT_SUPPORTED;                        \
+    }
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -239,50 +273,11 @@ ucc_status_t post_allreduce_kernel(
     void *kernel_args[] = {
         &mc_bar, &uc_bar, &base_u32, &offset, &count, &tsize};
 
-    switch (datatype) {
-    case UCC_DT_FLOAT32:
-        assert(((uintptr_t)(mc_base_addr) % 16) == 0);
-        if (sm_count == 1) {
-            cuda_st = cudaLaunchCooperativeKernel(
-                (void *)allreduce_kernel_vec32_1sm<NvlsFp32Ops>,
-                dim3(sm_count),
-                dim3(threads),
-                kernel_args,
-                0,
-                stream);
-        } else {
-            cuda_st = cudaLaunchCooperativeKernel(
-                (void *)allreduce_kernel_vec32<NvlsFp32Ops>,
-                dim3(sm_count),
-                dim3(threads),
-                kernel_args,
-                0,
-                stream);
-        }
-        break;
-    case UCC_DT_BFLOAT16:
-        assert(((uintptr_t)(mc_base_addr) % 16) == 0);
-        if (sm_count == 1) {
-            cuda_st = cudaLaunchCooperativeKernel(
-                (void *)allreduce_kernel_vec32_1sm<NvlsBf16Ops>,
-                dim3(sm_count),
-                dim3(threads),
-                kernel_args,
-                0,
-                stream);
-        } else {
-            cuda_st = cudaLaunchCooperativeKernel(
-                (void *)allreduce_kernel_vec32<NvlsBf16Ops>,
-                dim3(sm_count),
-                dim3(threads),
-                kernel_args,
-                0,
-                stream);
-        }
-        break;
-    default:
-        return UCC_ERR_NOT_SUPPORTED;
-    }
+    assert(((uintptr_t)(mc_base_addr) % 16) == 0);
+#define LAUNCH_AR(OPS)                                                          \
+    cuda_st = launch_allreduce<OPS>(sm_count, threads, kernel_args, stream)
+    NVLS_AR_DT_DISPATCH(datatype, LAUNCH_AR);
+#undef LAUNCH_AR
     if (cuda_st != cudaSuccess) {
         return cuda_error_to_ucc_status(cuda_st);
     }
@@ -330,49 +325,11 @@ ucc_status_t post_allreduce_lowlatency_kernel(
         &tsize};
 
     bool use_small_kernel = (src_size_bytes <= UCC_TL_CUDA_NVLS_LL_SMALL_THRESH);
-
-    switch (datatype) {
-    case UCC_DT_FLOAT32:
-        if (use_small_kernel) {
-            cuda_st = cudaLaunchKernel(
-                (void *)allreduce_kernel_vec32_lowlatency_small<NvlsFp32Ops>,
-                dim3(1),
-                dim3(threads),
-                kernel_args,
-                0,
-                stream);
-        } else {
-            cuda_st = cudaLaunchKernel(
-                (void *)allreduce_kernel_vec32_lowlatency<NvlsFp32Ops>,
-                dim3(1),
-                dim3(threads),
-                kernel_args,
-                0,
-                stream);
-        }
-        break;
-    case UCC_DT_BFLOAT16:
-        if (use_small_kernel) {
-            cuda_st = cudaLaunchKernel(
-                (void *)allreduce_kernel_vec32_lowlatency_small<NvlsBf16Ops>,
-                dim3(1),
-                dim3(threads),
-                kernel_args,
-                0,
-                stream);
-        } else {
-            cuda_st = cudaLaunchKernel(
-                (void *)allreduce_kernel_vec32_lowlatency<NvlsBf16Ops>,
-                dim3(1),
-                dim3(threads),
-                kernel_args,
-                0,
-                stream);
-        }
-        break;
-    default:
-        return UCC_ERR_NOT_SUPPORTED;
-    }
+#define LAUNCH_AR_LL(OPS)                                                       \
+    cuda_st = launch_allreduce_ll<OPS>(use_small_kernel, threads, kernel_args, \
+                                       stream)
+    NVLS_AR_DT_DISPATCH(datatype, LAUNCH_AR_LL);
+#undef LAUNCH_AR_LL
     if (cuda_st != cudaSuccess) {
         return cuda_error_to_ucc_status(cuda_st);
     }

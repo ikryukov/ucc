@@ -116,11 +116,56 @@
      }
  }
 
+ // Single-block reduce_scatter for small (latency-bound) messages.
+ template <typename NvlsOps>
+ __global__ void __launch_bounds__(UCC_TL_CUDA_MAX_NVLS_THREADS)
+     reduce_scatter_kernel_1sm(
+         ucc_tl_cuda_nvls_control_t *mc_bar, ucc_tl_cuda_nvls_control_t *uc_bar,
+         uint32_t *base_u32, size_t offset, size_t count, uint32_t *dst_u32,
+         uint32_t tsize)
+ {
+     NvlsBar nvls_barrier(tsize, mc_bar, uc_bar);
+
+     // PRE-BARRIER: wait until all GPUs have published their input
+     if (threadIdx.x == 0) {
+         nvls_barrier.sync(cuda::memory_order_relaxed);
+         nvls_barrier.commit();
+     }
+     __syncthreads();
+
+     constexpr int UNROLL = 8;
+     size_t    tid       = threadIdx.x * 4;
+     uint32_t *src_ptr   = base_u32 + offset + tid;
+     uint32_t *src_end   = base_u32 + offset + count;
+     uint32_t *dst_ptr   = dst_u32 + tid;
+     size_t    stride    = blockDim.x * 4;
+     size_t    stride_u  = stride * UNROLL;
+     uint32_t *end_align = src_end - stride * (UNROLL - 1);
+
+     for (; src_ptr < end_align; src_ptr += stride_u, dst_ptr += stride_u) {
+         uint4 val[UNROLL];
+ #pragma unroll
+         for (int i = 0; i < UNROLL; i++) {
+             NvlsOps::ld(val[i], src_ptr + i * stride);
+         }
+ #pragma unroll
+         for (int i = 0; i < UNROLL; i++) {
+             vec_st(val[i], dst_ptr + i * stride);
+         }
+     }
+     for (; src_ptr < src_end; src_ptr += stride, dst_ptr += stride) {
+         uint4 val;
+         NvlsOps::ld(val, src_ptr);
+         vec_st(val, dst_ptr);
+     }
+ }
+
  #ifdef __cplusplus
  extern "C" {
  #endif
 
  // Unified reduce_scatter kernel launcher
+ // - sm_count == 1: single-block kernel for small (latency-bound) messages
  // - sm_count == 4: uses lightweight 4-CTA kernel with cudaLaunchKernelExC
  // - sm_count > 4:  uses cooperative kernel with grid.sync()
  ucc_status_t post_reduce_scatter_kernel(
@@ -152,7 +197,31 @@
      void *kernel_args[] = {
          &mc_bar, &uc_bar, &base_u32, &offset, &count, &dst_u32, &tsize};
 
-     if (sm_count == 4) {
+     if (sm_count == 1) {
+         // Single-block kernel for small (latency-bound) messages
+         switch (datatype) {
+         case UCC_DT_FLOAT32:
+             cuda_st = cudaLaunchKernel(
+                 (void *)reduce_scatter_kernel_1sm<NvlsFp32Ops>,
+                 dim3(1),
+                 dim3(threads),
+                 kernel_args,
+                 0,
+                 stream);
+             break;
+         case UCC_DT_BFLOAT16:
+             cuda_st = cudaLaunchKernel(
+                 (void *)reduce_scatter_kernel_1sm<NvlsBf16Ops>,
+                 dim3(1),
+                 dim3(threads),
+                 kernel_args,
+                 0,
+                 stream);
+             break;
+         default:
+             return UCC_ERR_NOT_SUPPORTED;
+         }
+     } else if (sm_count == 4) {
          // Use lightweight 4-CTA kernel with cudaLaunchKernelExC
          // Grid barrier is embedded in uc_bar->grid_barrier
          cudaLaunchConfig_t config = {};

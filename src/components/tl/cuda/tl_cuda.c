@@ -57,8 +57,8 @@ static ucc_config_field_t ucc_tl_cuda_lib_config_table[] = {
      ucc_offsetof(ucc_tl_cuda_lib_config_t, nvls_symmetric_size),
      UCC_CONFIG_TYPE_MEMUNITS},
 
-    {"NVLS_SM_COUNT", "4",
-     "Number of SMs to use for NVLS",
+    {"NVLS_SM_COUNT", "0",
+     "Number of SMs to use for NVLS (0 = size-adaptive selection)",
      ucc_offsetof(ucc_tl_cuda_lib_config_t, nvls_sm_count),
      UCC_CONFIG_TYPE_UINT},
 

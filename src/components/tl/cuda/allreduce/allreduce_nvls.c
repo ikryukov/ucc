@@ -69,7 +69,9 @@ void ucc_tl_cuda_allreduce_nvls_progress(ucc_coll_task_t *coll_task)
     ucc_ee_h       ee     = task->super.ee;
     cudaStream_t   stream = (ee) ? (cudaStream_t)ee->ee_context : team->stream;
     ucc_datatype_t dt     = task->allreduce_nvls.dt;
-    uint32_t       sm_count = UCC_TL_CUDA_TEAM_LIB(team)->cfg.nvls_sm_count;
+    uint32_t       sm_count = ucc_tl_cuda_nvls_sm_count(
+        task->allreduce_nvls.buf_size_bytes,
+        UCC_TL_CUDA_TEAM_LIB(team)->cfg.nvls_sm_count);
     uint32_t       threads  = UCC_TL_CUDA_TEAM_LIB(team)->cfg.nvls_threads;
 
     ucc_status_t   status;

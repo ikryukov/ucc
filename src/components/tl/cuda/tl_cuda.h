@@ -47,7 +47,10 @@
  * NVLink-bound reduce. */
 #define UCC_TL_CUDA_NVLS_PIPE_THRESH     (512UL << 20)
 #define UCC_TL_CUDA_NVLS_PIPE_CHUNK      (64UL << 20)
-#define UCC_TL_CUDA_NVLS_MAX_PIPE_CHUNKS 8
+/* default number of pipeline chunks (overridable via env for tuning) */
+#define UCC_TL_CUDA_NVLS_PIPE_CHUNKS     8
+/* hard upper bound (sizes the per-call event arrays) */
+#define UCC_TL_CUDA_NVLS_MAX_PIPE_CHUNKS 32
 
 /* Pick the number of SMs (thread blocks) for an NVLS collective.
  * When cfg_sm_count != 0 the user value is honored; otherwise the count is

@@ -4,6 +4,7 @@
  * See file LICENSE for terms.
  */
 
+#include <stdlib.h>
 #include "allreduce/allreduce.h"
 #include "ucc/api/ucc.h"
 #include "core/ucc_ee.h"
@@ -78,7 +79,20 @@ static ucc_status_t ucc_tl_cuda_allreduce_nvls_pipeline(
     size_t       chunk, off;
     int          nchunks, k, c;
 
-    k = (int)(buf_size / UCC_TL_CUDA_NVLS_PIPE_CHUNK);
+    /* chunk count is tunable via env (UCC_PIPE_CHUNKS); default derives from a
+     * ~64MB target so chunks stay large enough to amortize barrier overhead. */
+    {
+        static int env_chunks = -1;
+        if (env_chunks < 0) {
+            const char *e = getenv("UCC_PIPE_CHUNKS");
+            env_chunks    = e ? atoi(e) : 0;
+        }
+        if (env_chunks > 0) {
+            k = env_chunks;
+        } else {
+            k = (int)(buf_size / UCC_TL_CUDA_NVLS_PIPE_CHUNK);
+        }
+    }
     if (k < 2) {
         k = 2;
     }

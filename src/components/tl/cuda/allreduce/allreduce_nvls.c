@@ -78,7 +78,7 @@ static ucc_status_t ucc_tl_cuda_allreduce_nvls_pipeline(
     size_t       chunk, off;
     int          nchunks, k, c;
 
-    k = (int)(buf_size / UCC_TL_CUDA_NVLS_PIPE_THRESH);
+    k = (int)(buf_size / UCC_TL_CUDA_NVLS_PIPE_CHUNK);
     if (k < 2) {
         k = 2;
     }

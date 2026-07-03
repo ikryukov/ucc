@@ -87,11 +87,9 @@ static ucc_status_t ucc_tl_cuda_allreduce_nvls_pipeline(
             const char *e = getenv("UCC_PIPE_CHUNKS");
             env_chunks    = e ? atoi(e) : 0;
         }
-        if (env_chunks > 0) {
-            k = env_chunks;
-        } else {
-            k = (int)(buf_size / UCC_TL_CUDA_NVLS_PIPE_CHUNK);
-        }
+        /* 8 chunks empirically optimal on VR200: enough copy/reduce overlap
+         * while keeping per-chunk barrier/launch overhead small. */
+        k = (env_chunks > 0) ? env_chunks : UCC_TL_CUDA_NVLS_PIPE_CHUNKS;
     }
     if (k < 2) {
         k = 2;

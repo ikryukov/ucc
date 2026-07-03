@@ -383,6 +383,125 @@ ucc_status_t ucc_tl_cuda_nvls_map_mc(CUmemGenericAllocationHandle mc_handle,
     return UCC_OK;
 }
 
+/* Blocking OOB allgather (spins the OOB to completion). Used for one-time
+ * per-buffer registration handshakes. */
+static ucc_status_t nvls_oob_allgather_blocking(ucc_tl_cuda_team_t *team,
+                                                void *sbuf, void *rbuf,
+                                                size_t size)
+{
+    void        *req = NULL;
+    ucc_status_t st;
+
+    st = team->oob.allgather(sbuf, rbuf, size, team->oob.coll_info, &req);
+    if (st != UCC_OK) {
+        return st;
+    }
+    do {
+        st = team->oob.req_test(req);
+    } while (st == UCC_INPROGRESS);
+    team->oob.req_free(req);
+    return st;
+}
+
+ucc_status_t ucc_tl_cuda_nvls_register(struct ucc_tl_cuda_team *team, void *ptr,
+                                       size_t size, CUdeviceptr *mc_va_out)
+{
+    ucc_tl_cuda_nvls_t          *nvls    = &team->nvls;
+    uint32_t                     tsize   = UCC_TL_TEAM_SIZE(team);
+    int                          rank    = UCC_TL_TEAM_RANK(team);
+    size_t                       minGran = nvls->minGran;
+    CUmemGenericAllocationHandle mc      = 0;
+    CUdeviceptr                  mc_va   = 0;
+    CUmemFabricHandle           *share   = NULL;
+    CUmulticastObjectProp        mc_prop;
+    CUmemFabricHandle            local;
+    ucc_status_t                 status;
+    size_t                       rsize;
+    int                          i;
+
+    /* cache lookup */
+    for (i = 0; i < nvls->reg_count; i++) {
+        if (nvls->reg_cache[i].ptr == ptr && nvls->reg_cache[i].size >= size) {
+            *mc_va_out = nvls->reg_cache[i].mc_va;
+            return UCC_OK;
+        }
+    }
+    if (nvls->reg_count >= UCC_TL_CUDA_NVLS_REG_CACHE_SIZE || minGran == 0 ||
+        (size % minGran) != 0) {
+        /* cache full or size not granularity-aligned: cannot register */
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+    rsize = size;
+
+    memset(&mc_prop, 0, sizeof(mc_prop));
+    mc_prop.numDevices  = tsize;
+    mc_prop.size        = rsize;
+    mc_prop.handleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+
+    share = (CUmemFabricHandle *)ucc_calloc(tsize, sizeof(*share), "nvls_reg");
+    if (!share) {
+        return UCC_ERR_NO_MEMORY;
+    }
+    memset(&local, 0, sizeof(local));
+    if (rank == 0) {
+        status = CUDADRV_FUNC(cuMulticastCreate(&mc, &mc_prop));
+        if (status != UCC_OK) {
+            goto err;
+        }
+        status = CUDADRV_FUNC(cuMemExportToShareableHandle(
+            &local, mc, CU_MEM_HANDLE_TYPE_FABRIC, 0));
+        if (status != UCC_OK) {
+            goto err;
+        }
+    }
+    /* broadcast rank0's fabric handle to all ranks */
+    status = nvls_oob_allgather_blocking(team, &local, share, sizeof(local));
+    if (status != UCC_OK) {
+        goto err;
+    }
+    if (rank != 0) {
+        status = CUDADRV_FUNC(cuMemImportFromShareableHandle(
+            &mc, &share[0], CU_MEM_HANDLE_TYPE_FABRIC));
+        if (status != UCC_OK) {
+            goto err;
+        }
+    }
+
+    /* collective: add device + bind the user VA into the multicast object.
+     * Fails (cleanly) if the buffer is not multicast-bindable (e.g. not
+     * VMM-backed) -> caller falls back to the staging/pipeline path. */
+    status = ucc_tl_cuda_nvls_bind_va(mc, nvls->device, (CUdeviceptr)ptr, rsize);
+    if (status != UCC_OK) {
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "NVLS register: bind failed for %p (%zu) - not registerable",
+                 ptr, rsize);
+        goto err;
+    }
+    status = ucc_tl_cuda_nvls_map_mc(mc, rsize, minGran, nvls->device, &mc_va);
+    if (status != UCC_OK) {
+        goto err;
+    }
+
+    nvls->reg_cache[nvls->reg_count].ptr       = ptr;
+    nvls->reg_cache[nvls->reg_count].size      = rsize;
+    nvls->reg_cache[nvls->reg_count].mc_handle = mc;
+    nvls->reg_cache[nvls->reg_count].mc_va     = mc_va;
+    nvls->reg_count++;
+    ucc_free(share);
+    *mc_va_out = mc_va;
+    tl_debug(UCC_TL_TEAM_LIB(team),
+             "NVLS register: %p size=%zu mc_va=%p (slot %d)", ptr, rsize,
+             (void *)mc_va, nvls->reg_count - 1);
+    return UCC_OK;
+
+err:
+    if (mc) {
+        CUDADRV_FUNC(cuMemRelease(mc));
+    }
+    ucc_free(share);
+    return (status == UCC_OK) ? UCC_ERR_NOT_SUPPORTED : status;
+}
+
 ucc_status_t ucc_tl_cuda_nvls_init(
     struct ucc_tl_cuda_team *team, struct ucc_base_context *tl_context)
 {
@@ -924,6 +1043,23 @@ cleanup:
 ucc_status_t ucc_tl_cuda_nvls_destroy(ucc_tl_cuda_team_t *team)
 {
     int device = team->nvls.device;
+    int i;
+
+    /* Release cached user-buffer registrations (zero-copy AR). */
+    for (i = 0; i < team->nvls.reg_count; i++) {
+        ucc_tl_cuda_nvls_reg_t *r = &team->nvls.reg_cache[i];
+        if (r->mc_va) {
+            CUDADRV_FUNC(cuMemUnmap(r->mc_va, r->size));
+            CUDADRV_FUNC(cuMemAddressFree(r->mc_va, r->size));
+        }
+        if (UCC_TL_TEAM_RANK(team) == 0 && r->mc_handle) {
+            CUDADRV_FUNC(cuMulticastUnbind(r->mc_handle, device, 0, r->size));
+        }
+        if (r->mc_handle) {
+            CUDADRV_FUNC(cuMemRelease(r->mc_handle));
+        }
+    }
+    team->nvls.reg_count = 0;
 
     // Rank 0: unbind the multicast object
     if (UCC_TL_TEAM_RANK(team) == 0 && team->nvls.mc_handle) {

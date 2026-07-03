@@ -217,6 +217,7 @@ void ucc_tl_cuda_allreduce_nvls_progress(ucc_coll_task_t *coll_task)
 
     ucc_status_t   status;
     cudaError_t    cuda_status;
+    CUdeviceptr    reg_mc_va = 0;
 
     switch (task->allreduce_nvls.stage) {
     case STAGE_KERNEL:
@@ -238,6 +239,34 @@ void ucc_tl_cuda_allreduce_nvls_progress(ucc_coll_task_t *coll_task)
             if (status != UCC_OK) {
                 tl_error(UCC_TASK_LIB(task),
                          "failed to post allreduce lowlatency kernel");
+                task->super.status = status;
+                return;
+            }
+        } else if (task->allreduce_nvls.sbuf == task->allreduce_nvls.rbuf &&
+                   task->allreduce_nvls.buf_size_bytes >=
+                       UCC_TL_CUDA_NVLS_PIPE_THRESH &&
+                   (task->allreduce_nvls.buf_size_bytes %
+                    (16 * UCC_TL_TEAM_SIZE(team))) == 0 &&
+                   ucc_tl_cuda_nvls_register(
+                       team, task->allreduce_nvls.rbuf,
+                       task->allreduce_nvls.buf_size_bytes,
+                       &reg_mc_va) == UCC_OK) {
+            /* Zero-copy: in-place partitioned reduce directly on the user
+             * buffer's multicast alias (no staging copies). */
+            status = post_allreduce_kernel(
+                stream,
+                sm_count,
+                threads,
+                reg_mc_va,
+                task->allreduce_nvls.buf_size_bytes,
+                TASK_NVLS_CONTROL_MC(task),
+                TASK_NVLS_CONTROL_UC(task),
+                trank,
+                UCC_TL_TEAM_SIZE(team),
+                dt);
+            if (status != UCC_OK) {
+                tl_error(UCC_TASK_LIB(task),
+                         "failed to post zero-copy allreduce");
                 task->super.status = status;
                 return;
             }

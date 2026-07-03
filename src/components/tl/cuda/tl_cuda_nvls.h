@@ -45,6 +45,17 @@ typedef enum {
     UCC_TL_CUDA_NVLS_STATE_BARRIER,
 } ucc_tl_cuda_nvls_state_t;
 
+#define UCC_TL_CUDA_NVLS_REG_CACHE_SIZE 16
+
+/* One cached user-buffer NVLS registration: a per-buffer multicast object
+ * bound over the user VA, plus its multicast alias used for zero-copy AR. */
+typedef struct ucc_tl_cuda_nvls_reg {
+    void                        *ptr;      /* user buffer base */
+    size_t                       size;     /* registered (granularity-rounded) */
+    CUmemGenericAllocationHandle mc_handle;/* per-buffer multicast object */
+    CUdeviceptr                  mc_va;    /* multicast alias of the user buffer */
+} ucc_tl_cuda_nvls_reg_t;
+
 typedef struct ucc_tl_cuda_nvls {
     // Multicast handle
     CUmemGenericAllocationHandle mc_handle;
@@ -88,6 +99,9 @@ typedef struct ucc_tl_cuda_nvls {
      * multicast while NVLS init fell back (e.g. peer fd import denied), and in
      * that case collectives must not be routed to the NVLS algorithms. */
     int                          enabled;
+    /* User-buffer registration cache for zero-copy allreduce. */
+    ucc_tl_cuda_nvls_reg_t       reg_cache[UCC_TL_CUDA_NVLS_REG_CACHE_SIZE];
+    int                          reg_count;
 } ucc_tl_cuda_nvls_t;
 
 typedef struct ucc_tl_cuda_nvls_control {
@@ -116,5 +130,12 @@ ucc_status_t ucc_tl_cuda_nvls_bind_va(CUmemGenericAllocationHandle mc_handle,
 ucc_status_t ucc_tl_cuda_nvls_map_mc(CUmemGenericAllocationHandle mc_handle,
                                      size_t size, size_t gran, int device,
                                      CUdeviceptr *mc_va_out);
+
+/* Collectively register a user device buffer for zero-copy NVLS: creates a
+ * per-buffer multicast object (fabric handle), binds the user VA into it and
+ * returns its multicast alias. Cached per team. Returns UCC_ERR_NOT_SUPPORTED
+ * if the buffer cannot be multicast-bound (e.g. not VMM-backed). */
+ucc_status_t ucc_tl_cuda_nvls_register(struct ucc_tl_cuda_team *team, void *ptr,
+                                       size_t size, CUdeviceptr *mc_va_out);
 
 #endif // UCC_TL_CUDA_NVLS_H_

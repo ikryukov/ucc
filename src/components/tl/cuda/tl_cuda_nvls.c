@@ -332,6 +332,57 @@ static ucc_status_t ucc_tl_cuda_nvls_import_handle_fabric(
     return UCC_OK;
 }
 
+/* Add the local device to a multicast object and bind a device VA range into
+ * it. cuMulticastBindAddr is collective (acts as a barrier across ranks that
+ * bind into the same object). Reused by the team symmetric buffer setup and by
+ * user-buffer registration. */
+ucc_status_t ucc_tl_cuda_nvls_bind_va(CUmemGenericAllocationHandle mc_handle,
+                                      int device, CUdeviceptr va, size_t size)
+{
+    ucc_status_t status;
+
+    status = CUDADRV_FUNC(cuMulticastAddDevice(mc_handle, device));
+    if (status != UCC_OK) {
+        return status;
+    }
+    status = CUDADRV_FUNC(cuMulticastBindAddr(mc_handle, 0, va, size, 0));
+    return status;
+}
+
+/* Reserve a device VA and map a multicast handle into it with R/W access.
+ * On success *mc_va_out holds the multicast alias; on failure all partial
+ * resources are released. */
+ucc_status_t ucc_tl_cuda_nvls_map_mc(CUmemGenericAllocationHandle mc_handle,
+                                     size_t size, size_t gran, int device,
+                                     CUdeviceptr *mc_va_out)
+{
+    CUmemAccessDesc access;
+    CUdeviceptr     mc_va  = 0;
+    ucc_status_t    status;
+
+    access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    access.location.id   = device;
+    access.flags         = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+
+    status = CUDADRV_FUNC(cuMemAddressReserve(&mc_va, size, gran, 0U, 0));
+    if (status != UCC_OK) {
+        return status;
+    }
+    status = CUDADRV_FUNC(cuMemMap(mc_va, size, 0, mc_handle, 0));
+    if (status != UCC_OK) {
+        cuMemAddressFree(mc_va, size);
+        return status;
+    }
+    status = CUDADRV_FUNC(cuMemSetAccess(mc_va, size, &access, 1));
+    if (status != UCC_OK) {
+        cuMemUnmap(mc_va, size);
+        cuMemAddressFree(mc_va, size);
+        return status;
+    }
+    *mc_va_out = mc_va;
+    return UCC_OK;
+}
+
 ucc_status_t ucc_tl_cuda_nvls_init(
     struct ucc_tl_cuda_team *team, struct ucc_base_context *tl_context)
 {
@@ -702,47 +753,26 @@ ucc_status_t ucc_tl_cuda_nvls_init(
             NVLS_CONTROL_SIZE,
             lib->cfg.max_concurrent), cleanup, status);
 
-        /* Add device to multicast object */
-        status = CUDADRV_FUNC(
-            cuMulticastAddDevice(nvls->mc_handle, nvls->device));
+        /* Add device to the multicast object and bind the unicast VA into it.
+         * cuMulticastBindAddr blocks until all ranks call cuMulticastAddDevice,
+         * acting as a collective barrier. */
+        status = ucc_tl_cuda_nvls_bind_va(nvls->mc_handle, nvls->device, uc_va,
+                                          mc_size);
         if (status != UCC_OK) {
             tl_error(UCC_TL_TEAM_LIB(team),
-                     "failed to add device to multicast");
+                     "failed to bind unicast memory to multicast");
             goto cleanup;
         }
         tl_debug(UCC_TL_TEAM_LIB(team),
                  "RANK %d: added device %d to multicast",
                  UCC_TL_TEAM_RANK(team), nvls->device);
 
-        /* Bind memory to multicast object; blocks until all ranks call
-         * cuMulticastAddDevice, acting as a collective barrier. */
-        status = CUDADRV_FUNC(cuMulticastBindAddr(
-            nvls->mc_handle, 0 /*mcOffset*/, uc_va, mc_size, 0));
+        /* Reserve and map the multicast VA alias. */
+        status = ucc_tl_cuda_nvls_map_mc(nvls->mc_handle, mc_size, nvls->minGran,
+                                         nvls->device, &mc_va);
         if (status != UCC_OK) {
             tl_error(UCC_TL_TEAM_LIB(team),
-                     "failed to bind memory to multicast");
-            goto cleanup;
-        }
-
-        // Reserve and map multicast virtual address space
-        status = CUDADRV_FUNC(
-            cuMemAddressReserve(&mc_va, mc_size, nvls->minGran, 0U, 0));
-        if (status != UCC_OK) {
-            tl_error(UCC_TL_TEAM_LIB(team),
-                     "failed to reserve multicast virtual address space");
-            goto cleanup;
-        }
-
-        status = CUDADRV_FUNC(cuMemMap(mc_va, mc_size, 0, nvls->mc_handle, 0));
-        if (status != UCC_OK) {
-            tl_error(UCC_TL_TEAM_LIB(team), "failed to map multicast memory");
-            goto cleanup;
-        }
-
-        status = CUDADRV_FUNC(cuMemSetAccess(mc_va, mc_size, &accessDesc, 1));
-        if (status != UCC_OK) {
-            tl_error(UCC_TL_TEAM_LIB(team),
-                     "failed to set multicast memory access");
+                     "failed to map multicast memory");
             goto cleanup;
         }
 

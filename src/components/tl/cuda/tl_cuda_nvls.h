@@ -107,4 +107,14 @@ ucc_status_t ucc_tl_cuda_nvls_init(
 
 ucc_status_t ucc_tl_cuda_nvls_destroy(struct ucc_tl_cuda_team *team);
 
+/* Add the local device to a multicast object and bind a device VA range into
+ * it (collective; cuMulticastBindAddr barriers across binding ranks). */
+ucc_status_t ucc_tl_cuda_nvls_bind_va(CUmemGenericAllocationHandle mc_handle,
+                                      int device, CUdeviceptr va, size_t size);
+
+/* Reserve a device VA and map a multicast handle into it (R/W). */
+ucc_status_t ucc_tl_cuda_nvls_map_mc(CUmemGenericAllocationHandle mc_handle,
+                                     size_t size, size_t gran, int device,
+                                     CUdeviceptr *mc_va_out);
+
 #endif // UCC_TL_CUDA_NVLS_H_

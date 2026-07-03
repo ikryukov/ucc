@@ -46,11 +46,10 @@
  * per-chunk partitioned multicast reduce, hiding the copies behind the
  * NVLink-bound reduce. */
 #define UCC_TL_CUDA_NVLS_PIPE_THRESH     (512UL << 20)
-#define UCC_TL_CUDA_NVLS_PIPE_CHUNK      (64UL << 20)
-/* default number of pipeline chunks (overridable via env for tuning) */
+/* number of pipeline chunks (8 empirically optimal on VR200); also sizes the
+ * per-call event arrays */
 #define UCC_TL_CUDA_NVLS_PIPE_CHUNKS     8
-/* hard upper bound (sizes the per-call event arrays) */
-#define UCC_TL_CUDA_NVLS_MAX_PIPE_CHUNKS 32
+#define UCC_TL_CUDA_NVLS_MAX_PIPE_CHUNKS UCC_TL_CUDA_NVLS_PIPE_CHUNKS
 
 /* Pick the number of SMs (thread blocks) for an NVLS collective.
  * When cfg_sm_count != 0 the user value is honored; otherwise the count is

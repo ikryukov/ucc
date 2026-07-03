@@ -433,6 +433,20 @@ ucc_status_t ucc_tl_cuda_nvls_register(struct ucc_tl_cuda_team *team, void *ptr,
     }
     rsize = size;
 
+    /* Cheap local check that the buffer is VMM-backed (cuMem*) before doing any
+     * collective work: cuMemRetainAllocationHandle fails for cudaMalloc'd
+     * memory. This keeps the fallback (staging/pipeline) path free of the
+     * expensive per-call MC create + OOB when registration isn't possible.
+     * Called directly (not via CUDADRV_FUNC) to avoid logging on the common
+     * non-registerable case. */
+    {
+        CUmemGenericAllocationHandle test_h;
+        if (cuMemRetainAllocationHandle(&test_h, ptr) != CUDA_SUCCESS) {
+            return UCC_ERR_NOT_SUPPORTED;
+        }
+        cuMemRelease(test_h);
+    }
+
     memset(&mc_prop, 0, sizeof(mc_prop));
     mc_prop.numDevices  = tsize;
     mc_prop.size        = rsize;

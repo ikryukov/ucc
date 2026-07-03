@@ -56,6 +56,135 @@ ucc_status_t ucc_tl_cuda_allreduce_nvls_start(ucc_coll_task_t *coll_task)
     return ucc_progress_queue_enqueue(UCC_TL_CORE_CTX(team)->pq, &task->super);
 }
 
+/* Large-message allreduce with copy/reduce overlap: the message is split into
+ * chunks; copy-in runs on s_in and copy-out on s_out (separate streams) so the
+ * HBM staging copies overlap the NVLink-bound per-chunk partitioned reduce on
+ * rstream. Ephemeral streams/events are used so it is safe under concurrent
+ * collectives (CUDA defers their destruction until the work completes). */
+static ucc_status_t ucc_tl_cuda_allreduce_nvls_pipeline(
+    ucc_tl_cuda_team_t *team, void *sbuf, void *rbuf, CUdeviceptr mc_va,
+    CUdeviceptr uc_va, CUdeviceptr mc_ctrl, CUdeviceptr uc_ctrl,
+    size_t buf_size, uint32_t sm_count, uint32_t threads, ucc_rank_t trank,
+    ucc_datatype_t dt, cudaStream_t rstream)
+{
+    uint32_t     tsize = UCC_TL_TEAM_SIZE(team);
+    size_t       align = (size_t)16 * tsize;
+    cudaStream_t s_in  = NULL;
+    cudaStream_t s_out = NULL;
+    cudaEvent_t  ev_in[UCC_TL_CUDA_NVLS_MAX_PIPE_CHUNKS]  = {0};
+    cudaEvent_t  ev_red[UCC_TL_CUDA_NVLS_MAX_PIPE_CHUNKS] = {0};
+    cudaEvent_t  ev_out[UCC_TL_CUDA_NVLS_MAX_PIPE_CHUNKS] = {0};
+    ucc_status_t status = UCC_OK;
+    size_t       chunk, off;
+    int          nchunks, k, c;
+
+    k = (int)(buf_size / UCC_TL_CUDA_NVLS_PIPE_THRESH);
+    if (k < 2) {
+        k = 2;
+    }
+    if (k > UCC_TL_CUDA_NVLS_MAX_PIPE_CHUNKS) {
+        k = UCC_TL_CUDA_NVLS_MAX_PIPE_CHUNKS;
+    }
+    chunk   = ((buf_size / k) + align - 1) / align * align;
+    nchunks = (int)((buf_size + chunk - 1) / chunk);
+
+    status = CUDA_FUNC(cudaStreamCreateWithFlags(&s_in, cudaStreamNonBlocking));
+    if (status != UCC_OK) {
+        goto out;
+    }
+    status = CUDA_FUNC(cudaStreamCreateWithFlags(&s_out, cudaStreamNonBlocking));
+    if (status != UCC_OK) {
+        goto out;
+    }
+    for (c = 0; c < nchunks; c++) {
+        if (CUDA_FUNC(cudaEventCreateWithFlags(
+                &ev_in[c], cudaEventDisableTiming)) != UCC_OK ||
+            CUDA_FUNC(cudaEventCreateWithFlags(
+                &ev_red[c], cudaEventDisableTiming)) != UCC_OK ||
+            CUDA_FUNC(cudaEventCreateWithFlags(
+                &ev_out[c], cudaEventDisableTiming)) != UCC_OK) {
+            status = UCC_ERR_NO_RESOURCE;
+            goto out;
+        }
+    }
+
+    /* copy-in chunks (run ahead on s_in, overlapping the reduces) */
+    for (c = 0, off = 0; c < nchunks; c++) {
+        size_t csz = (buf_size - off < chunk) ? (buf_size - off) : chunk;
+        status = CUDA_FUNC(cudaMemcpyAsync((void *)(uc_va + off),
+                                           PTR_OFFSET(sbuf, off), csz,
+                                           cudaMemcpyDeviceToDevice, s_in));
+        if (status != UCC_OK) {
+            goto out;
+        }
+        status = CUDA_FUNC(cudaEventRecord(ev_in[c], s_in));
+        if (status != UCC_OK) {
+            goto out;
+        }
+        off += csz;
+    }
+    /* partitioned reduce per chunk on rstream, each gated on its copy-in */
+    for (c = 0, off = 0; c < nchunks; c++) {
+        size_t csz = (buf_size - off < chunk) ? (buf_size - off) : chunk;
+        status = CUDA_FUNC(cudaStreamWaitEvent(rstream, ev_in[c], 0));
+        if (status != UCC_OK) {
+            goto out;
+        }
+        status = post_allreduce_kernel(rstream, sm_count, threads, mc_va + off,
+                                       csz, mc_ctrl, uc_ctrl, trank, tsize, dt);
+        if (status != UCC_OK) {
+            goto out;
+        }
+        status = CUDA_FUNC(cudaEventRecord(ev_red[c], rstream));
+        if (status != UCC_OK) {
+            goto out;
+        }
+        off += csz;
+    }
+    /* copy-out chunks on s_out, each gated on its reduce (overlaps reduces) */
+    for (c = 0, off = 0; c < nchunks; c++) {
+        size_t csz = (buf_size - off < chunk) ? (buf_size - off) : chunk;
+        status = CUDA_FUNC(cudaStreamWaitEvent(s_out, ev_red[c], 0));
+        if (status != UCC_OK) {
+            goto out;
+        }
+        status = CUDA_FUNC(cudaMemcpyAsync(PTR_OFFSET(rbuf, off),
+                                           (void *)(uc_va + off), csz,
+                                           cudaMemcpyDeviceToDevice, s_out));
+        if (status != UCC_OK) {
+            goto out;
+        }
+        status = CUDA_FUNC(cudaEventRecord(ev_out[c], s_out));
+        if (status != UCC_OK) {
+            goto out;
+        }
+        off += csz;
+    }
+    /* rstream (on which the caller records the completion event) waits for the
+     * last copy-out; s_out is ordered so this covers all chunks. */
+    status = CUDA_FUNC(cudaStreamWaitEvent(rstream, ev_out[nchunks - 1], 0));
+
+out:
+    if (s_in) {
+        cudaStreamDestroy(s_in);
+    }
+    if (s_out) {
+        cudaStreamDestroy(s_out);
+    }
+    for (c = 0; c < nchunks; c++) {
+        if (ev_in[c]) {
+            cudaEventDestroy(ev_in[c]);
+        }
+        if (ev_red[c]) {
+            cudaEventDestroy(ev_red[c]);
+        }
+        if (ev_out[c]) {
+            cudaEventDestroy(ev_out[c]);
+        }
+    }
+    return status;
+}
+
 void ucc_tl_cuda_allreduce_nvls_progress(ucc_coll_task_t *coll_task)
 {
     ucc_tl_cuda_task_t  *task  = ucc_derived_of(coll_task, ucc_tl_cuda_task_t);
@@ -97,6 +226,32 @@ void ucc_tl_cuda_allreduce_nvls_progress(ucc_coll_task_t *coll_task)
             if (status != UCC_OK) {
                 tl_error(UCC_TASK_LIB(task),
                          "failed to post allreduce lowlatency kernel");
+                task->super.status = status;
+                return;
+            }
+        } else if (task->allreduce_nvls.buf_size_bytes >=
+                       UCC_TL_CUDA_NVLS_PIPE_THRESH &&
+                   (task->allreduce_nvls.buf_size_bytes %
+                    (16 * UCC_TL_TEAM_SIZE(team))) == 0) {
+            /* Large messages: overlap the staging copies with the partitioned
+             * reduce (chunked, separate copy streams). */
+            status = ucc_tl_cuda_allreduce_nvls_pipeline(
+                team,
+                task->allreduce_nvls.sbuf,
+                task->allreduce_nvls.rbuf,
+                mc_va,
+                uc_va,
+                TASK_NVLS_CONTROL_MC(task),
+                TASK_NVLS_CONTROL_UC(task),
+                task->allreduce_nvls.buf_size_bytes,
+                sm_count,
+                threads,
+                trank,
+                dt,
+                stream);
+            if (status != UCC_OK) {
+                tl_error(UCC_TASK_LIB(task),
+                         "failed to post pipelined allreduce");
                 task->super.status = status;
                 return;
             }

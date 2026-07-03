@@ -41,6 +41,12 @@
 #define UCC_TL_CUDA_NVLS_LL_SMALL_THRESH (16 * 1024)
 /* Small-message kernel threshold (uint32 count) for allgatherv */
 #define UCC_TL_CUDA_NVLS_SMALL_MSG_U32   4096
+/* Large-message allreduce copy/reduce pipeline: at or above this size the
+ * staging copies are chunked and overlapped (on separate streams) with the
+ * per-chunk partitioned multicast reduce, hiding the copies behind the
+ * NVLink-bound reduce. */
+#define UCC_TL_CUDA_NVLS_PIPE_THRESH     (4 << 20)
+#define UCC_TL_CUDA_NVLS_MAX_PIPE_CHUNKS 8
 
 /* Pick the number of SMs (thread blocks) for an NVLS collective.
  * When cfg_sm_count != 0 the user value is honored; otherwise the count is
